@@ -1,6 +1,6 @@
 # keep-ram-clean
 
-A zero-dependency, configurable Linux **RAM, tmpfs, swap, and memory-pressure management daemon and CLI**.
+A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linux **RAM, tmpfs, swap, and memory-pressure management**.
 
 `keep-ram-clean` monitors your system using native Linux kernel telemetry (`/proc/meminfo`, `/proc/pressure/memory` PSI, `/proc/swaps`, `/proc/mounts`) and triggers safe, modular cleanup actions **only when you specify** — via memory/PSI thresholds, periodic intervals, cron schedules, or on-demand signals.
 
@@ -8,6 +8,10 @@ A zero-dependency, configurable Linux **RAM, tmpfs, swap, and memory-pressure ma
 
 ## Key Features
 
+- **Ultra-Lightweight Native Rust Binary**
+  - ~2 MiB resident RAM, `0.0%` idle CPU, ~2 ms CLI startup, zero runtime dependencies.
+  - Best-effort `mlockall()` in root daemon mode keeps the daemon resident even during severe memory thrashing.
+  - Linear-time `regex` and glob matching (immune to ReDoS).
 - **Flexible User-Defined Triggers**
   - **Reactive thresholds** with cooldown & hysteresis: RAM %, minimum available MiB, swap %, swap MiB, and `tmpfs` usage %.
   - **Linux PSI (Pressure Stall Information)**: Triggers on actual kernel memory contention (`/proc/pressure/memory` `some`/`full` `avg10`), avoiding false alarms from healthy Linux page cache.
@@ -15,33 +19,36 @@ A zero-dependency, configurable Linux **RAM, tmpfs, swap, and memory-pressure ma
   - **On-demand control**: `keep-ram-clean run`, `keep-ram-clean trigger` (`SIGUSR1`), and live hot-reload via `keep-ram-clean reload` (`SIGHUP`).
 - **Safe, Modern Linux Memory Reclamation**
   - **cgroup v2 `memory.reclaim` (Linux 6.1+ root cgroup)**: Gently reclaims cold pages without the cold-cache I/O storm caused by blindly running `drop_caches=3`.
-  - **Configurable `drop_caches` & `compact_memory`**: Defaults to critical-only slab/dentry reclamation (`drop_caches_level = 2`, `drop_caches_on_critical_only = true`) so routine cleanups avoid unnecessary I/O stalls.
+  - **Configurable `drop_caches` & `compact_memory`**: Defaults to critical-only slab/dentry reclamation (`drop_caches_level = 2`, `drop_caches_on_critical_only = true`).
   - **Smart Swap Flushing**: Automatically detects and **skips `zram`** devices, checks RAM headroom + safety margin, checks CPU load, preserves swap priorities (`swapon -p`), and verifies swapfiles are writable before cycling.
   - **Open-File-Safe `tmpfs` Cleaner**: Verifies targets are actually `tmpfs` mounts, enforces glob allowlists/denylists, nested `mtime` checks, and scans `/proc/*/fd` so active files are never deleted.
-  - **Graceful Process Watchdog (Opt-in)**: Regex + RSS thresholds with `notify`, `sigterm`, or `graceful` (SIGTERM → wait → optional SIGKILL) actions pinned via Linux `pidfd`.
+  - **Graceful Process Watchdog (Opt-in)**: Linear-time regex + RSS thresholds with `notify`, `sigterm`, or `graceful` (SIGTERM → wait → optional SIGKILL) pinned via Linux `pidfd`.
   - **Built-in `doctor` Command**: Audits PSI, cgroup v2 reclaim, MGLRU, zram/zswap, `vm.swappiness`, `vm.vfs_cache_pressure`, monitored `tmpfs` paths, and top memory consumers.
-- **Zero External Dependencies**: Pure Python 3.9+ stdlib (uses `tomllib` on 3.11+ with a built-in fallback parser for 3.9–3.10).
 - **Dry-Run & JSON Modes**: Preview every action safely with `--dry-run`, or integrate with scripts/bars using `--json` on `status`, `run`, and `doctor`.
 
 ---
 
-## Installation
+## Build & Installation
+
+Requires Rust 1.75+ (`cargo`).
 
 ### System-Wide (Recommended — enables kernel reclaim & swap management)
 
 ```bash
+cargo build --release
 sudo ./scripts/install.sh --system
 ```
 
-This installs the `keep-ram-clean` CLI, creates `/etc/keep-ram-clean/config.toml`, and enables `keep-ram-clean.service` under `systemd`.
+This installs `/usr/local/bin/keep-ram-clean`, creates `/etc/keep-ram-clean/config.toml`, and enables `keep-ram-clean.service` under `systemd`.
 
 ### User Mode (Non-root — `tmpfs`, process watchdog & user caches)
 
 ```bash
+cargo build --release
 ./scripts/install.sh --user
 ```
 
-This installs to `~/.local/bin/keep-ram-clean`, creates `~/.config/keep-ram-clean/config.toml`, and enables the systemd user service.
+This installs `~/.local/bin/keep-ram-clean`, creates `~/.config/keep-ram-clean/config.toml`, and enables the systemd user service.
 
 ### Uninstall
 
@@ -82,35 +89,12 @@ keep-ram-clean init-config [-o PATH] [-f]
 
 ---
 
-## Configuration
-
-See [config/config.example.toml](config/config.example.toml) for all options. Example trigger configurations:
-
-```toml
-[triggers]
-poll_interval_seconds = 15
-cooldown_seconds = 300
-hysteresis_percent = 5.0
-
-# Trigger when RAM >= 80% OR available RAM <= 1536 MiB OR kernel PSI spikes
-ram_used_percent = 80.0
-min_available_mb = 1536
-psi_some_avg10 = 10.0
-psi_full_avg10 = 2.0
-
-# Optional: clean every 120 minutes and/or daily at 03:00
-interval_minutes = 0
-schedules = ["03:00"]
-```
-
----
-
 ## Security & Privilege Model
 
-- **Root config isolation**: When running as `root` (e.g. `sudo keep-ram-clean run` or `keep-ram-clean.service`), `keep-ram-clean` only auto-loads `/etc/keep-ram-clean/config.toml` and enforces that any loaded config file (including `--config`) is a regular file owned by `uid 0`, not group/world-writable, with all ancestor directories up to `/` also root-owned and non-group/world-writable.
-- **Symlink & mount-boundary safety**: Both `tmpfs` and `user_caches` cleaners traverse directories using `dir_fd` + `O_NOFOLLOW`, enforce a depth cap (`64`), never cross filesystem (`st_dev`) boundaries, and skip files held open by running processes.
-- **PID-reuse immunity**: Daemon signalling (`trigger` / `reload`) and the process watchdog pin processes with Linux `pidfd` (`os.pidfd_open` + `signal.pidfd_send_signal`) and verify `/proc/<pid>/stat` start times.
-- **Sandboxed systemd units**: The system unit pins `PATH`, limits capabilities (`CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`, `CAP_KILL`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`), blocks `@mount`, enables `PrivateNetwork=yes`, `ProtectSystem=full`, `ProtectHome=yes`, `LogsDirectory=keep-ram-clean`, and `MemoryDenyWriteExecute=yes` (note: disable `MemoryDenyWriteExecute` via drop-in if running under experimental CPython 3.13+ JIT).
+- **Root config isolation**: When running as `root`, `keep-ram-clean` only auto-loads `/etc/keep-ram-clean/config.toml` and enforces that any loaded config file (including `--config`) is a regular file owned by `uid 0`, not group/world-writable, with all ancestor directories up to `/` also root-owned and non-group/world-writable.
+- **Symlink & mount-boundary safety**: Both `tmpfs` and `user_caches` cleaners traverse directories using `openat` + `O_NOFOLLOW`, enforce a depth cap (`64`), never cross filesystem (`st_dev`) boundaries, and skip files held open by running processes.
+- **PID-reuse immunity**: Daemon signalling (`trigger` / `reload`) and the process watchdog pin processes with Linux `pidfd` (`pidfd_open` + `pidfd_send_signal`) and verify `/proc/<pid>/stat` start times.
+- **Sandboxed systemd units**: The system unit pins `PATH`, limits capabilities (`CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`, `CAP_KILL`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`), blocks `@mount`, enables `PrivateNetwork=yes`, `ProtectSystem=full`, `ProtectHome=yes`, `LogsDirectory=keep-ram-clean`, and `MemoryDenyWriteExecute=yes`.
 - See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ---
@@ -118,7 +102,8 @@ schedules = ["03:00"]
 ## Running Tests
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
 ## License

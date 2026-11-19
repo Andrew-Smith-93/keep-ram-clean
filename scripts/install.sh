@@ -14,7 +14,7 @@ Usage: $(basename "$0") [--user | --system] [--no-service]
 Options:
   --user         Install for current user (~/.local/bin, ~/.config/keep-ram-clean) [default]
   --system       Install system-wide (requires root; /usr/local/bin, /etc/keep-ram-clean)
-  --no-service   Install CLI and config only; do not install/enable systemd service
+  --no-service   Install binary and config only; do not install/enable systemd service
   -h, --help     Show this help message
 EOF
 }
@@ -29,33 +29,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "Error: python3 (>= 3.9) is required." >&2
-    exit 1
-fi
-
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; then
-    echo "Error: Python 3.9 or newer is required (found $(python3 --version))." >&2
-    exit 1
-fi
-
-if ! python3 -m pip --version >/dev/null 2>&1; then
-    echo "Error: python3 -m pip is required (install python3-pip)." >&2
-    exit 1
-fi
-
-install_python_pkg() {
-    local pip_flags=("$@")
-    if python3 -m pip install --help 2>/dev/null | grep -q -- "--break-system-packages"; then
-        pip_flags+=("--break-system-packages")
+BINARY="$PROJECT_DIR/target/release/keep-ram-clean"
+if [[ ! -x "$BINARY" ]]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "Error: Prebuilt binary not found at $BINARY and 'cargo' is not in PATH." >&2
+        echo "Build first with: cargo build --release" >&2
+        exit 1
     fi
-    if python3 -c 'import setuptools' >/dev/null 2>&1; then
-        python3 -m pip install --no-cache-dir --no-build-isolation --no-deps "${pip_flags[@]}" "$PROJECT_DIR"
-    else
-        echo "Note: setuptools not pre-installed; using pip build isolation..."
-        python3 -m pip install --no-cache-dir --no-deps "${pip_flags[@]}" "$PROJECT_DIR"
-    fi
-}
+    echo "[0/3] Building release binary with cargo..."
+    (cd "$PROJECT_DIR" && cargo build --release)
+fi
 
 if [[ "$MODE" == "system" ]]; then
     if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -63,8 +46,9 @@ if [[ "$MODE" == "system" ]]; then
         exit 1
     fi
 
-    echo "[1/3] Installing keep-ram-clean system-wide..."
-    install_python_pkg --prefix /usr/local
+    echo "[1/3] Installing keep-ram-clean binary to /usr/local/bin/keep-ram-clean..."
+    install -d -m 0755 -o root -g root /usr/local/bin
+    install -m 0755 -o root -g root "$BINARY" /usr/local/bin/keep-ram-clean
 
     echo "[2/3] Installing default config to /etc/keep-ram-clean/config.toml..."
     install -d -m 0755 -o root -g root /etc/keep-ram-clean
@@ -84,13 +68,9 @@ if [[ "$MODE" == "system" ]]; then
         echo "[3/3] Skipping systemd service installation."
     fi
 else
-    echo "[1/3] Installing keep-ram-clean for user $(id -un)..."
-    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
-        echo "Note: Active virtualenv detected ($VIRTUAL_ENV); installing into virtualenv."
-        install_python_pkg
-    else
-        install_python_pkg --user
-    fi
+    echo "[1/3] Installing keep-ram-clean binary to $HOME/.local/bin/keep-ram-clean..."
+    install -d -m 0755 "$HOME/.local/bin"
+    install -m 0755 "$BINARY" "$HOME/.local/bin/keep-ram-clean"
 
     XDG_BASE="${XDG_CONFIG_HOME:-$HOME/.config}"
     if [[ "$XDG_BASE" != /* ]]; then
@@ -120,7 +100,7 @@ else
         echo "[3/3] Skipping systemd user service installation."
     fi
 
-    if [[ -z "${VIRTUAL_ENV:-}" && ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
         echo "Note: $HOME/.local/bin is not in your PATH. Add it to invoke 'keep-ram-clean' directly."
     fi
 fi

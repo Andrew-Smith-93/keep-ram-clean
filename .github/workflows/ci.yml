@@ -6,23 +6,22 @@ on:
   pull_request:
 
 jobs:
-  test:
+  build-and-test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: ${{ matrix.python-version }}
+          components: clippy
       - name: Run unit & security tests
-        run: PYTHONPATH=src python3 -m unittest discover -s tests -v
-      - name: Smoke-test CLI
+        run: cargo test --verbose
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build release binary & smoke-test CLI
         run: |
-          PYTHONPATH=src python3 -m keep_ram_clean --version
-          PYTHONPATH=src python3 -m keep_ram_clean status --json > /dev/null
-          PYTHONPATH=src python3 -m keep_ram_clean doctor --json > /dev/null
-          PYTHONPATH=src python3 -m keep_ram_clean run --dry-run --json > /dev/null
+          cargo build --release
+          ./target/release/keep-ram-clean --version
+          ./target/release/keep-ram-clean status --json > /dev/null
+          ./target/release/keep-ram-clean doctor --json > /dev/null
+          ./target/release/keep-ram-clean run --dry-run --json > /dev/null

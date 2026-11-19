@@ -2,11 +2,15 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.0.0] - 2026-11-19
+
+### Changed
+- **Full Rust rewrite**: Replaced the Python implementation with a single native Rust binary (~2 MiB RSS vs ~18 MiB Python RSS, ~2ms CLI startup, zero runtime dependencies).
+- **ReDoS-proof watchdog**: Uses Rust's linear-time `regex` engine and linear-time glob matcher.
+- **Self-pipe signal wakeup & `mlockall`**: Async-signal-safe self-pipe + `poll(2)` eliminates lost wakeups; root daemon calls best-effort `mlockall(MCL_CURRENT | MCL_FUTURE)` to stay resident under severe memory thrashing.
+- **100% config & CLI compatibility**: Existing `config.toml` files, systemd units, CLI flags, and JSON schemas work seamlessly.
+
 ## [1.0.0] - 2026-11-19
 
 ### Added
-- Configurable Linux RAM, `tmpfs`, swap, and memory-pressure management CLI and background daemon (`keep-ram-clean`).
-- Reactive trigger engine supporting RAM %, available MiB, swap %/MiB, `tmpfs` %, Linux PSI (`/proc/pressure/memory`), cooldown, hysteresis, CPU load guardrails, periodic intervals, and daily/cron schedules.
-- Safe, modular cleaners: `dir_fd`/`O_NOFOLLOW` `tmpfs` cleaner with open-file protection, `pidfd`-pinned process watchdog, optional user cache cleaner, cgroup v2 `memory.reclaim` + `drop_caches` kernel reclaimer, and zram-aware disk swap flusher.
-- `keep-ram-clean status` (text + JSON), `keep-ram-clean doctor` (text + JSON), `keep-ram-clean run --dry-run`, `init-config`, `trigger` (`SIGUSR1`), and `reload` (`SIGHUP`).
-- Hardened `systemd` system and user units, plus `scripts/install.sh` and `scripts/uninstall.sh`.
+- Initial Python release of `keep-ram-clean` CLI, background daemon, PSI/cron trigger engine, `doctor` diagnostics, and hardened systemd units.
