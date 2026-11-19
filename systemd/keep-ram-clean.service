@@ -1,0 +1,49 @@
+[Unit]
+Description=keep-ram-clean — Configurable Linux Memory & Swap Management Daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=PATH=/usr/sbin:/sbin:/usr/bin:/bin
+ExecStart=/usr/local/bin/keep-ram-clean --config /etc/keep-ram-clean/config.toml daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+RuntimeDirectory=keep-ram-clean
+RuntimeDirectoryMode=0755
+LogsDirectory=keep-ram-clean
+LogsDirectoryMode=0750
+UMask=0027
+
+# Keep the daemon itself responsive and low-priority
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+OOMScoreAdjust=-500
+
+# Sandboxing: ProtectSystem=full protects /usr, /boot, /etc while keeping swapfiles writable.
+# CAP_SYS_PTRACE is required to read /proc/<pid>/fd for non-root skip_open_files protection.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL CAP_DAC_OVERRIDE CAP_FOWNER
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=no
+ProtectSystem=full
+ReadOnlyPaths=/proc/sys /sys/fs/cgroup
+ReadWritePaths=/tmp -/proc/sys/vm/drop_caches -/proc/sys/vm/compact_memory -/sys/fs/cgroup/memory.reclaim
+# ProtectHome=yes by default; override via drop-in if enabling [user_caches] in system mode
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@mount
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,184 @@
+# ==============================================================================
+# keep-ram-clean configuration
+# Locations searched automatically:
+#   - Explicit:  --config /path/to/config.toml
+#   - Root mode: /etc/keep-ram-clean/config.toml ONLY (must be root-owned, 0644/0600,
+#                with root-owned non-writable parent directories; also enforced for --config)
+#   - User mode: ~/.config/keep-ram-clean/config.toml, then /etc/keep-ram-clean/config.toml
+# ==============================================================================
+
+[triggers]
+# How often the daemon samples /proc metrics (seconds)
+poll_interval_seconds = 15
+
+# Minimum wait between consecutive cleanups to prevent thrashing (seconds)
+cooldown_seconds = 300
+
+# Percentage drop required below threshold before a threshold trigger re-arms
+hysteresis_percent = 5.0
+
+# --- Reactive Thresholds (set any to 0 to disable) ---
+# Trigger when (MemTotal - MemAvailable) / MemTotal >= ram_used_percent
+ram_used_percent = 80.0
+
+# Trigger when MemAvailable drops below this many MiB
+min_available_mb = 1536
+
+# Trigger when swap usage reaches this percentage or absolute MiB
+swap_used_percent = 50.0
+swap_used_mb = 0
+
+# Trigger when any monitored tmpfs mount (e.g., /tmp) exceeds this % full
+tmpfs_used_percent = 70.0
+
+# Linux Pressure Stall Information (/proc/pressure/memory) triggers.
+# Far more accurate than raw RAM % because Linux intentionally uses free RAM
+# for page cache. 'some' = at least one task stalled; 'full' = all tasks stalled.
+psi_some_avg10 = 10.0
+psi_full_avg10 = 2.0
+
+# --- Proactive Time-Based Triggers ---
+# Run cleanup every N minutes regardless of pressure (0 = disabled)
+interval_minutes = 0
+
+# Specific wall-clock schedules: "HH:MM" (daily) or 5-field cron "M H DOM MON DOW"
+# Examples: ["03:00"], ["0 */4 * * *"], ["30 2 * * 0"]
+schedules = []
+
+# Defer non-critical cleanups when 1-min load average exceeds ratio * CPU cores (0 = off)
+max_load_avg_ratio = 0.0
+
+
+[tmpfs]
+# Clean stale ephemeral build/temp directories from RAM-backed tmpfs mounts
+enabled = true
+paths = ["/tmp"]
+
+# Safety guard: only clean paths that are genuinely mounted as tmpfs
+require_tmpfs = true
+
+# Glob patterns inside each path eligible for cleanup
+patterns = [
+    "tmp*",
+    "pytest-of-*",
+    "npm-*",
+    "pip-*",
+    "cargo-*",
+    "rustc*",
+    "go-build*",
+    "webpack-*",
+    "vite-*",
+]
+
+# Patterns that are NEVER deleted even if they match above
+exclude_patterns = [
+    ".X11-unix",
+    ".ICE-unix",
+    ".XIM-unix",
+    ".font-unix",
+    "systemd-private-*",
+    "ssh-*",
+    "tmux-*",
+    "keep-ram-clean-*",
+]
+
+# Only remove items not modified in at least this many minutes
+min_age_minutes = 30
+
+# When running non-root, only remove items owned by the current user
+owner_only = true
+
+# Never delete files/directories currently held open by any running process
+skip_open_files = true
+
+
+[watchdog]
+# Optional runaway-process watchdog (disabled by default for safety).
+# Actions: "notify", "sigterm", "graceful" (SIGTERM then optional SIGKILL), "sigkill"
+enabled = false
+
+# Example: gracefully stop KDE Baloo if it balloons past 1.5 GiB RSS
+# [[watchdog.rules]]
+# name = "baloo-indexer"
+# pattern = "baloo_file(_extractor)?"
+# max_rss_mb = 1536
+# action = "graceful"
+# grace_seconds = 10
+# allow_sigkill = false
+
+# Example: alert on GNOME tracker miner exceeding 1 GiB
+# [[watchdog.rules]]
+# name = "tracker-miner"
+# pattern = "tracker-miner-fs"
+# max_rss_mb = 1024
+# action = "notify"
+
+
+[user_caches]
+# Optional disk cache hygiene (disabled by default; disk caches do not use RAM
+# unless ~/.cache is mounted on tmpfs)
+enabled = false
+clean_thumbnails = true
+thumbnail_max_age_days = 14
+clean_pip_cache = false
+extra_cache_dirs = []
+extra_cache_max_age_days = 14
+# When running as root, specify usernames whose caches may be cleaned.
+# If empty under systemd (no SUDO_USER), user_caches is safely skipped (never cleans /root).
+target_users = []
+
+
+[kernel]
+# Kernel-level memory reclamation (requires root; skipped cleanly in user mode)
+enabled = true
+
+# Prefer modern Linux 6.1+ root cgroup v2 proactive reclaim (/sys/fs/cgroup/memory.reclaim)
+# which gently ages out cold pages without causing cold-cache I/O storms
+use_cgroup_reclaim = true
+cgroup_reclaim_mb = 512
+
+# /proc/sys/vm/drop_caches level:
+#   0 = disabled
+#   1 = pagecache only
+#   2 = reclaimable slab objects (dentries & inodes) [recommended default]
+#   3 = pagecache + slab (aggressive; causes brief cold-cache slowdown)
+drop_caches_level = 2
+
+# Only invoke drop_caches when a critical pressure trigger fires (recommended with cgroup reclaim)
+drop_caches_on_critical_only = true
+
+# Trigger /proc/sys/vm/compact_memory (off by default; Linux kcompactd runs asynchronously)
+compact_memory = false
+
+
+[swap]
+# Smart swap flushing (requires root; skipped cleanly in user mode)
+enabled = true
+
+# Only flush a disk swap device if it holds at least this many MiB
+min_swap_used_mb = 128
+
+# Require Available RAM >= SwapUsed + safety_margin_mb before flushing
+safety_margin_mb = 1536
+
+# Skip zram devices (flushing compressed RAM back into RAM is counterproductive)
+skip_zram = true
+
+# Skip swap flush if 1-min load average exceeds ratio * CPU cores
+max_load_avg_ratio = 1.5
+
+
+[notifications]
+# Desktop notifications via notify-send (user mode only; skipped when running as root)
+enabled = false
+min_freed_mb = 100
+on_critical_only = false
+
+
+[logging]
+level = "INFO"
+# Optional rotating log file path (empty = log to stderr / systemd journal).
+# Under systemd system mode, /var/log/keep-ram-clean/ is pre-provisioned via LogsDirectory=.
+file = ""
+max_bytes = 5242880
+backup_count = 3
