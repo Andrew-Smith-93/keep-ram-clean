@@ -500,10 +500,7 @@ fn verify_daemon_process(pid: i32, expected_starttime: Option<u64>) -> bool {
         return false;
     }
     let cmd = read_proc_cmdline(pid);
-    if !cmd.is_empty() && !cmd.contains("keep-ram-clean") && !cmd.contains("keep_ram_clean") {
-        return false;
-    }
-    true
+    cmd.is_empty() || cmd.contains("keep-ram-clean") || cmd.contains("keep_ram_clean")
 }
 
 fn is_trusted_state_file(rdir: &Path, state_path: &Path) -> bool {
@@ -517,11 +514,7 @@ fn is_trusted_state_file(rdir: &Path, state_path: &Path) -> bool {
     let Ok(fm) = fs::symlink_metadata(state_path) else {
         return false;
     };
-    if !fm.file_type().is_file() || (fm.uid() != 0 && fm.uid() != euid) || (fm.mode() & 0o022) != 0
-    {
-        return false;
-    }
-    true
+    fm.file_type().is_file() && (fm.uid() == 0 || fm.uid() == euid) && (fm.mode() & 0o022) == 0
 }
 
 pub fn read_daemon_state(runtime_dir: Option<&Path>) -> Option<DaemonState> {
