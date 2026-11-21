@@ -1,0 +1,25 @@
+[Unit]
+Description=keep-ram-clean (User Mode) — tmpfs, Watchdog & Cache Cleanup Daemon
+Documentation=man:keep-ram-clean(1)
+After=default.target
+
+[Service]
+Type=simple
+Environment=PATH=/usr/bin:/bin
+ExecStart=/usr/bin/keep-ram-clean daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+UMask=0077
+
+NoNewPrivileges=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

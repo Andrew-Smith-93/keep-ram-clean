@@ -1,0 +1,55 @@
+.TH KEEP-RAM-CLEAN 1 "November 2026" "keep-ram-clean 2.2.0" "User Commands"
+.SH NAME
+keep-ram-clean \- configurable Linux RAM, tmpfs, swap, and memory-pressure management daemon and CLI
+.SH SYNOPSIS
+.B keep-ram-clean
+[\fB\-c\fR \fIPATH\fR]
+\fICOMMAND\fR [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B keep-ram-clean
+monitors Linux memory telemetry from \fI/proc/meminfo\fR, Pressure Stall Information
+(\fI/proc/pressure/memory\fR), \fI/proc/swaps\fR, and \fI/proc/mounts\fR, and executes
+safe, modular memory reclamation actions only when user-configured thresholds,
+intervals, or cron schedules are triggered.
+.SH COMMANDS
+.TP
+.B status \fR[\fB\-\-watch\fR] [\fB\-\-interval\fR \fISECS\fR] [\fB\-\-top\fR \fIN\fR] [\fB\-\-json\fR]
+Display a full-width dashboard of RAM, swap, tmpfs mounts, PSI contention, top memory
+consumers, auto-clean triggers, and recent cleanup activity. In \fB\-\-watch\fR mode,
+interactive hotkeys allow triggering cleanups (\fBc\fR), adjusting RAM trigger
+thresholds (\fB+\fR/\fB\-\fR), toggling desktop notifications (\fBn\fR), reloading
+config (\fBr\fR), and quitting (\fBq\fR).
+.TP
+.B run \fR[\fB\-\-dry\-run\fR] [\fB\-\-only\fR \fISTEPS\fR] [\fB\-\-critical\fR] [\fB\-\-json\fR] [\fB\-v\fR]
+Execute a one-shot cleanup immediately. Valid steps: \fBtmpfs\fR, \fBwatchdog\fR,
+\fBuser_caches\fR, \fBkernel\fR, \fBswap\fR.
+.TP
+.B daemon \fR[\fB\-\-dry\-run\fR]
+Start the background monitoring and cleanup daemon. Supports \fBSIGHUP\fR for live
+config reload and \fBSIGUSR1\fR for immediate on-demand cleanup.
+.TP
+.B config show \fR| \fBconfig set \fIKEY VALUE\fR
+Inspect or update auto-clean trigger and notification settings in \fIconfig.toml\fR
+and automatically hot-reload the running daemon.
+.TP
+.B doctor \fR[\fB\-\-json\fR]
+Audit Linux kernel VM configuration including PSI, cgroup v2 \fImemory.reclaim\fR,
+MGLRU, zram/zswap, \fIvm.swappiness\fR, and \fIvm.vfs_cache_pressure\fR.
+.TP
+.B init-config \fR[\fB\-o\fR \fIPATH\fR] [\fB\-f\fR]
+Generate a documented starter \fIconfig.toml\fR.
+.TP
+.B trigger \fR| \fBreload\fR
+Send \fBSIGUSR1\fR (immediate cleanup) or \fBSIGHUP\fR (reload config) to the running
+daemon using Linux \fIpidfd\fR verification.
+.SH FILES
+.TP
+.I /etc/keep-ram-clean/config.toml
+System-wide configuration file (used exclusively in root/system mode).
+.TP
+.I ~/.config/keep-ram-clean/config.toml
+Per-user configuration file (used in non-root user mode).
+.SH AUTHOR
+Written by the keep-ram-clean contributors.
+.SH LICENSE
+MIT License.

@@ -20,8 +20,14 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Build release binary & smoke-test CLI
         run: |
-          cargo build --release
+          cargo build --release --locked
           ./target/release/keep-ram-clean --version
           ./target/release/keep-ram-clean status --json > /dev/null
           ./target/release/keep-ram-clean doctor --json > /dev/null
           ./target/release/keep-ram-clean run --dry-run --json > /dev/null
+      - name: Build & verify .deb package
+        run: |
+          chmod +x scripts/build-deb.sh
+          ./scripts/build-deb.sh dist
+          sudo apt-get update -qq && sudo apt-get install -y -qq lintian
+          lintian --no-tag-display-limit dist/*.deb || true

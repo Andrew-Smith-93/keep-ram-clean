@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+if [ "$1" = "purge" ]; then
+    rm -rf /run/keep-ram-clean /var/log/keep-ram-clean
+fi
+
+#DEBHELPER#
+exit 0

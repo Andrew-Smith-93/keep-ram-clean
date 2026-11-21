@@ -1,0 +1,22 @@
+keep-ram-clean for Debian
+=========================
+
+Configuration
+-------------
+The system-wide daemon reads /etc/keep-ram-clean/config.toml.
+Edit trigger thresholds or schedules using:
+
+  sudo keep-ram-clean config show
+  sudo keep-ram-clean config set ram-percent 75
+
+Systemd Service
+---------------
+The system service is installed to /usr/lib/systemd/system/keep-ram-clean.service
+and is disabled by default until enabled by the administrator:
+
+  sudo systemctl enable --now keep-ram-clean.service
+
+A non-root user service is also provided at
+/usr/lib/systemd/user/keep-ram-clean.service:
+
+  systemctl --user enable --now keep-ram-clean.service

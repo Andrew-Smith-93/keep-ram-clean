@@ -1,0 +1,28 @@
+Source: keep-ram-clean
+Section: admin
+Priority: optional
+Maintainer: Andrew Smith <137859776+Andrew-Smith-93@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cargo,
+ rustc (>= 1.75),
+Standards-Version: 4.7.0
+Homepage: https://github.com/Andrew-Smith-93/keep-ram-clean
+Vcs-Browser: https://github.com/Andrew-Smith-93/keep-ram-clean
+Vcs-Git: https://github.com/Andrew-Smith-93/keep-ram-clean.git
+Rules-Requires-Root: no
+
+Package: keep-ram-clean
+Architecture: linux-any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: Configurable Linux RAM, tmpfs, swap, and memory-pressure daemon
+ keep-ram-clean is a lightweight Rust daemon and CLI that monitors Linux memory
+ health via /proc/meminfo, Pressure Stall Information (/proc/pressure/memory),
+ /proc/swaps, and /proc/mounts, triggering safe modular cleanup actions only
+ when user-specified thresholds or schedules are met.
+ .
+ Features include cgroup v2 proactive memory.reclaim, zram-aware disk swap
+ flushing, open-file-safe tmpfs cleanup, a pidfd-pinned process watchdog, an
+ interactive full-width status dashboard, and a kernel VM doctor audit.

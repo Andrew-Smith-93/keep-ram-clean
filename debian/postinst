@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if systemctl is-active --quiet keep-ram-clean.service 2>/dev/null; then
+        systemctl try-restart keep-ram-clean.service >/dev/null 2>&1 || true
+    fi
+fi
+
+#DEBHELPER#
+exit 0

@@ -1,0 +1,46 @@
+[Unit]
+Description=keep-ram-clean — Configurable Linux Memory & Swap Management Daemon
+Documentation=man:keep-ram-clean(1)
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=PATH=/usr/sbin:/sbin:/usr/bin:/bin
+ExecStart=/usr/bin/keep-ram-clean --config /etc/keep-ram-clean/config.toml daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+RuntimeDirectory=keep-ram-clean
+RuntimeDirectoryMode=0755
+LogsDirectory=keep-ram-clean
+LogsDirectoryMode=0750
+UMask=0027
+
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+OOMScoreAdjust=-500
+
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL CAP_DAC_OVERRIDE CAP_FOWNER
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=no
+ProtectSystem=full
+ReadOnlyPaths=/proc/sys /sys/fs/cgroup
+ReadWritePaths=/tmp -/proc/sys/vm/drop_caches -/proc/sys/vm/compact_memory -/sys/fs/cgroup/memory.reclaim
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@mount
+
+[Install]
+WantedBy=multi-user.target

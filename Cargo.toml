@@ -24,3 +24,20 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[package.metadata.deb]
+maintainer = "Andrew Smith <137859776+Andrew-Smith-93@users.noreply.github.com>"
+copyright = "2026, keep-ram-clean contributors"
+license-file = ["LICENSE", "0"]
+section = "admin"
+priority = "optional"
+conf-files = ["/etc/keep-ram-clean/config.toml"]
+maintainer-scripts = "debian/"
+assets = [
+    ["target/release/keep-ram-clean", "usr/bin/", "755"],
+    ["config/config.example.toml", "etc/keep-ram-clean/config.toml", "644"],
+    ["debian/keep-ram-clean.service", "usr/lib/systemd/system/keep-ram-clean.service", "644"],
+    ["debian/keep-ram-clean-user.service", "usr/lib/systemd/user/keep-ram-clean.service", "644"],
+    ["debian/keep-ram-clean.1", "usr/share/man/man1/keep-ram-clean.1", "644"],
+    ["debian/README.Debian", "usr/share/doc/keep-ram-clean/README.Debian", "644"],
+]

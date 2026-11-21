@@ -1,0 +1,28 @@
+#!/usr/bin/make -f
+
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --locked
+
+override_dh_auto_test:
+	cargo test --locked
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/keep-ram-clean \
+		debian/keep-ram-clean/usr/bin/keep-ram-clean
+	install -D -m 0644 config/config.example.toml \
+		debian/keep-ram-clean/etc/keep-ram-clean/config.toml
+	install -D -m 0644 debian/keep-ram-clean.service \
+		debian/keep-ram-clean/usr/lib/systemd/system/keep-ram-clean.service
+	install -D -m 0644 debian/keep-ram-clean-user.service \
+		debian/keep-ram-clean/usr/lib/systemd/user/keep-ram-clean.service
+	install -D -m 0644 debian/keep-ram-clean.1 \
+		debian/keep-ram-clean/usr/share/man/man1/keep-ram-clean.1
+
+override_dh_auto_clean:
+	cargo clean
+	rm -rf debian/.cargo

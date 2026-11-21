@@ -30,7 +30,16 @@ A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linu
 
 ## Build & Installation
 
-Requires Rust 1.75+ (`cargo`).
+### Debian / Ubuntu (`.deb` Package)
+
+Download the `.deb` from [GitHub Releases](https://github.com/Andrew-Smith-93/keep-ram-clean/releases) (or build locally with `./scripts/build-deb.sh`):
+
+```bash
+sudo apt install ./keep-ram-clean_2.2.0-1_amd64.deb
+sudo systemctl enable --now keep-ram-clean.service
+```
+
+### From Source (Rust 1.75+)
 
 ### System-Wide (Recommended — enables kernel reclaim & swap management)
 

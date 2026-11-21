@@ -1,5 +1,9 @@
-# Rust build artifacts
+# Rust & Debian build artifacts
 /target/
+/dist/
+*.deb
+*.buildinfo
+*.changes
 
 # Editor & OS files
 .DS_Store
