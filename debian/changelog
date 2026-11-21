@@ -1,6 +1,6 @@
 keep-ram-clean (2.2.0-1) unstable; urgency=medium
 
-  * Initial Debian package release.
+  * Initial Debian package release (Closes: #1154647).
   * Native Rust CLI and systemd daemon with PSI/cron trigger engine,
     cgroup v2 memory.reclaim, zram-aware swap flushing, open-file-safe
     tmpfs cleaner, pidfd-pinned process watchdog, interactive --watch
