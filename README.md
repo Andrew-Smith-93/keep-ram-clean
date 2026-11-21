@@ -63,7 +63,7 @@ This installs `~/.local/bin/keep-ram-clean`, creates `~/.config/keep-ram-clean/c
 
 ```bash
 # Check live RAM, PSI, swap, tmpfs, top processes, and daemon status
-keep-ram-clean status [--top N] [--json]
+keep-ram-clean status [--top N] [--watch] [--interval SECS] [--json]
 
 # Audit Linux kernel VM configuration & memory health
 keep-ram-clean doctor [--json]

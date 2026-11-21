@@ -6,64 +6,36 @@ mod daemon;
 mod doctor;
 mod metrics;
 mod triggers;
+mod ui;
 
-use std::env;
 use std::fs::{self, File};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
 use crate::cleaners::{run_cleanup, ALL_STEP_NAMES};
 use crate::config::{
-    default_user_config, expand_tilde, is_root, load_config, DEFAULT_SYSTEM_CONFIG,
+    default_user_config, expand_tilde, is_root, load_config, Config, DEFAULT_SYSTEM_CONFIG,
     EXAMPLE_CONFIG_TOML,
 };
 use crate::daemon::{read_daemon_state, signal_daemon, RamCleanDaemon, VERSION};
 use crate::doctor::run_doctor;
 use crate::metrics::{collect_snapshot, top_memory_processes};
+use crate::ui::{
+    fmt_mib, fmt_mib_f64, gauge_bar, mini_bar, print_banner, print_section, psi_badge,
+    truncate_str, Palette, BOX_WIDTH,
+};
 
-struct Palette {
-    bold: &'static str,
-    dim: &'static str,
-    green: &'static str,
-    cyan: &'static str,
-    yellow: &'static str,
-    red: &'static str,
-    nc: &'static str,
-}
+static WATCH_STOP: AtomicBool = AtomicBool::new(false);
 
-impl Palette {
-    fn detect() -> Self {
-        let no_color = env::var_os("NO_COLOR")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        let use_color = std::io::stdout().is_terminal() && !no_color;
-        if use_color {
-            Self {
-                bold: "\x1b[1m",
-                dim: "\x1b[2m",
-                green: "\x1b[0;32m",
-                cyan: "\x1b[0;36m",
-                yellow: "\x1b[1;33m",
-                red: "\x1b[0;31m",
-                nc: "\x1b[0m",
-            }
-        } else {
-            Self {
-                bold: "",
-                dim: "",
-                green: "",
-                cyan: "",
-                yellow: "",
-                red: "",
-                nc: "",
-            }
-        }
-    }
+extern "C" fn handle_watch_sigint(_sig: libc::c_int) {
+    WATCH_STOP.store(true, Ordering::SeqCst);
 }
 
 fn fmt_ts(ts: f64) -> String {
@@ -130,6 +102,12 @@ enum Commands {
         /// Number of top memory processes to display
         #[arg(long, default_value_t = 5)]
         top: usize,
+        /// Live-refreshing dashboard mode (Ctrl+C to exit)
+        #[arg(short, long)]
+        watch: bool,
+        /// Refresh interval in seconds for --watch mode
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
     },
     /// Audit kernel VM settings and memory health
     Doctor {
@@ -160,7 +138,7 @@ fn cmd_run(
     as_json: bool,
     verbose: bool,
 ) -> i32 {
-    let c = Palette::detect();
+    let p = Palette::detect();
     let cfg = match load_config(cfg_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -225,49 +203,303 @@ fn cmd_run(
         return code;
     }
 
-    let mode = if report.dry_run {
-        format!(" {}[DRY-RUN]{}", c.yellow, c.nc)
+    let (badge, badge_col) = if report.dry_run {
+        ("◎ DRY-RUN", p.yellow)
+    } else if report.has_errors {
+        ("✖ ERRORS", p.red)
     } else {
-        String::new()
+        ("✔ COMPLETE", p.green)
     };
-    println!("{}{}keep-ram-clean v{VERSION}{}{mode}", c.bold, c.cyan, c.nc);
+    print_banner(&format!("keep-ram-clean v{VERSION} · Cleanup"), badge, badge_col, &p);
     println!(
-        "Config: {}",
+        "  {}Config:{} {}",
+        p.dim,
+        p.nc,
         cfg.source_path
             .as_ref()
-            .map(|p| p.display().to_string())
+            .map(|c| c.display().to_string())
             .unwrap_or_else(|| "built-in defaults".into())
     );
-    println!("{}", "-".repeat(58));
+
+    print_section("STEPS", &p);
     for step in &report.steps {
-        let icon = match step.status.as_str() {
-            "ok" => format!("{}✔{}", c.green, c.nc),
-            "dry-run" => format!("{}◎{}", c.cyan, c.nc),
-            "skipped" => format!("{}–{}", c.yellow, c.nc),
-            _ => format!("{}✖{}", c.red, c.nc),
+        let (icon, col) = match step.status.as_str() {
+            "ok" => ("✔", p.green),
+            "dry-run" => ("◎", p.cyan),
+            "skipped" => ("–", p.yellow),
+            _ => ("✖", p.red),
         };
-        println!(" {icon} {}{:<12}{} {}", c.bold, step.name, c.nc, step.summary);
+        println!(
+            "  {col}{icon}{} {}{:<12}{} {}",
+            p.nc, p.bold, step.name, p.nc, step.summary
+        );
         if verbose || report.dry_run || step.status == "error" {
             for d in &step.details {
-                println!("     {}• {d}{}", c.dim, c.nc);
+                println!("      {}• {d}{}", p.dim, p.nc);
             }
         }
     }
-    println!("{}", "-".repeat(58));
+
+    print_section("SUMMARY", &p);
+    let ram_col = if report.ram_freed_mb > 0 {
+        p.green
+    } else {
+        p.dim
+    };
+    let swap_col = if report.swap_freed_mb > 0 {
+        p.green
+    } else {
+        p.dim
+    };
     println!(
-        "Available RAM : {}{} MiB{} (was {} MiB, {:+} MiB)",
-        c.bold, report.post_available_mb, c.nc, report.pre_available_mb, report.ram_freed_mb
+        "  {:<14} {}{}{} {} (was {}, {ram_col}{:+} MiB{})",
+        "Available RAM",
+        p.bold,
+        fmt_mib(report.post_available_mb),
+        p.nc,
+        p.dim,
+        fmt_mib(report.pre_available_mb),
+        report.ram_freed_mb,
+        p.nc
     );
     println!(
-        "Swap Used     : {}{} MiB{} (was {} MiB, {:+} MiB)",
-        c.bold, report.post_swap_used_mb, c.nc, report.pre_swap_used_mb, -report.swap_freed_mb
+        "  {:<14} {}{}{} {} (was {}, {swap_col}{:+} MiB{})",
+        "Swap Used",
+        p.bold,
+        fmt_mib(report.post_swap_used_mb),
+        p.nc,
+        p.dim,
+        fmt_mib(report.pre_swap_used_mb),
+        -report.swap_freed_mb,
+        p.nc
     );
-    println!("Elapsed       : {:.2}s", report.duration_seconds);
+    println!("  {:<14} {:.2}s", "Elapsed", report.duration_seconds);
     code
 }
 
-fn cmd_status(cfg_path: Option<PathBuf>, as_json: bool, top: usize) -> i32 {
-    let c = Palette::detect();
+fn render_status_dashboard(cfg: &Config, top: usize, p: &Palette) {
+    let snap = collect_snapshot(Some(&cfg.tmpfs.paths), true, true, true, true);
+    let top_procs = top_memory_processes(top);
+    let daemon_state = read_daemon_state(None);
+    let mem = &snap.memory;
+    let t = &cfg.triggers;
+
+    let (badge, badge_col) = match daemon_state.as_ref().filter(|d| d.alive) {
+        Some(_) => ("● DAEMON RUNNING", p.green),
+        None => ("○ DAEMON STOPPED", p.yellow),
+    };
+    print_banner(&format!("keep-ram-clean v{VERSION}"), badge, badge_col, p);
+
+    // Memory & Swap
+    print_section("MEMORY & SWAP", p);
+    let ram_pct = mem.used_percent();
+    let ram_crit = if t.ram_used_percent > 0.0 {
+        t.ram_used_percent
+    } else {
+        80.0
+    };
+    let ram_warn = (ram_crit - 15.0).max(50.0);
+    let ram_bar = gauge_bar(ram_pct, 24, ram_warn, ram_crit, p);
+    let ram_col = p.severity_color(ram_pct, ram_warn, ram_crit);
+    println!(
+        "  {:<8} {ram_bar} {ram_col}{:>5.1}%{}  {}{} / {}{}  {}({} free){}",
+        "RAM",
+        ram_pct,
+        p.nc,
+        p.bold,
+        fmt_mib(mem.used_mb),
+        fmt_mib(mem.total_mb),
+        p.nc,
+        p.dim,
+        fmt_mib(mem.available_mb),
+        p.nc
+    );
+
+    let swap_pct = mem.swap_used_percent();
+    let swap_crit = if t.swap_used_percent > 0.0 {
+        t.swap_used_percent
+    } else {
+        50.0
+    };
+    let swap_warn = (swap_crit - 20.0).max(20.0);
+    let swap_bar = gauge_bar(swap_pct, 24, swap_warn, swap_crit, p);
+    let swap_col = p.severity_color(swap_pct, swap_warn, swap_crit);
+    println!(
+        "  {:<8} {swap_bar} {swap_col}{:>5.1}%{}  {}{} / {}{}",
+        "Swap",
+        swap_pct,
+        p.nc,
+        p.bold,
+        fmt_mib(mem.swap_used_mb),
+        fmt_mib(mem.swap_total_mb),
+        p.nc
+    );
+
+    println!(
+        "  {}Caches   PageCache {} · Reclaimable Slab {} · Dirty {}{}",
+        p.dim,
+        fmt_mib(mem.cached_mb),
+        fmt_mib(mem.slab_reclaimable_mb),
+        fmt_mib(mem.dirty_mb),
+        p.nc
+    );
+
+    if !snap.swaps.is_empty() {
+        for s in &snap.swaps {
+            let tag = if s.is_zram() {
+                format!(" {}[zram]{}", p.cyan, p.nc)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {}  ↳{} {}{tag}  {}{}/{}{}",
+                p.dim,
+                p.nc,
+                s.path,
+                p.dim,
+                fmt_mib(s.used_mb),
+                fmt_mib(s.size_mb),
+                p.nc
+            );
+        }
+    }
+
+    // tmpfs mounts
+    if !snap.tmpfs_mounts.is_empty() {
+        print_section("TMPFS MOUNTS", p);
+        let tmp_crit = if t.tmpfs_used_percent > 0.0 {
+            t.tmpfs_used_percent
+        } else {
+            70.0
+        };
+        let tmp_warn = (tmp_crit - 20.0).max(40.0);
+        for m in &snap.tmpfs_mounts {
+            let pct = m.used_percent();
+            let bar = gauge_bar(pct, 24, tmp_warn, tmp_crit, p);
+            let col = p.severity_color(pct, tmp_warn, tmp_crit);
+            println!(
+                "  {:<8} {bar} {col}{:>5.1}%{}  {} / {}",
+                truncate_str(&m.mountpoint, 8),
+                pct,
+                p.nc,
+                fmt_mib(m.used_mb),
+                fmt_mib(m.total_mb)
+            );
+        }
+    }
+
+    // Pressure & Load
+    print_section("PRESSURE & LOAD", p);
+    if snap.psi.available {
+        let badge = psi_badge(
+            snap.psi.some_avg10,
+            snap.psi.full_avg10,
+            t.psi_some_avg10,
+            t.psi_full_avg10,
+            p,
+        );
+        println!(
+            "  {:<8} {badge}  {}some{} avg10={:.2} avg60={:.2}  {}│{}  {}full{} avg10={:.2} avg60={:.2}",
+            "PSI",
+            p.bold,
+            p.nc,
+            snap.psi.some_avg10,
+            snap.psi.some_avg60,
+            p.dim,
+            p.nc,
+            p.bold,
+            p.nc,
+            snap.psi.full_avg10,
+            snap.psi.full_avg60
+        );
+    }
+    let ratio = snap.load_ratio();
+    let load_col = p.severity_color(ratio * 100.0, 80.0, 120.0);
+    println!(
+        "  {:<8} {:.2}  {:.2}  {:.2}  {}({} cores · ratio {load_col}{:.2}{}{})",
+        "Load",
+        snap.load_avg_1m,
+        snap.load_avg_5m,
+        snap.load_avg_15m,
+        p.dim,
+        snap.cpu_count,
+        ratio,
+        p.nc,
+        p.dim
+    );
+    print!("{}", p.nc);
+
+    // Top consumers
+    if !top_procs.is_empty() {
+        print_section(&format!("TOP {} MEMORY CONSUMERS", top_procs.len()), p);
+        let total_f = mem.total_mb.max(1) as f64;
+        for proc in &top_procs {
+            let frac = proc.rss_mb / total_f;
+            let bar = mini_bar(frac, 12, p);
+            println!(
+                "  {}PID {:<7}{} {:<18} {bar} {:>9} {}({:>4.1}%){}",
+                p.dim,
+                proc.pid,
+                p.nc,
+                truncate_str(&proc.comm, 18),
+                fmt_mib_f64(proc.rss_mb),
+                p.dim,
+                frac * 100.0,
+                p.nc
+            );
+        }
+    }
+
+    // Daemon
+    print_section("DAEMON", p);
+    if let Some(ds) = daemon_state.filter(|d| d.alive) {
+        println!(
+            "  {}● RUNNING{}  PID {}{}{}  {}· since {}{}",
+            p.green,
+            p.nc,
+            p.bold,
+            ds.pid,
+            p.nc,
+            p.dim,
+            fmt_ts(ds.started_at),
+            p.nc
+        );
+        println!(
+            "  Cleanups   {} run  {}· cumulative {}{:+} MiB RAM{}, {}{:+} MiB swap{}",
+            ds.cleanups_run,
+            p.dim,
+            p.green,
+            ds.total_ram_freed_mb,
+            p.dim,
+            p.cyan,
+            -ds.total_swap_freed_mb,
+            p.nc
+        );
+        if let Some(last) = ds.last_cleanup {
+            println!(
+                "  Last Run   {}  {}— {}{}",
+                fmt_ts(last.finished_at),
+                p.dim,
+                last.reasons.join("; "),
+                p.nc
+            );
+        }
+    } else {
+        println!(
+            "  {}○ NOT RUNNING{}  {}Start with: keep-ram-clean daemon (or systemd service){}",
+            p.yellow, p.nc, p.dim, p.nc
+        );
+    }
+}
+
+fn cmd_status(
+    cfg_path: Option<PathBuf>,
+    as_json: bool,
+    top: usize,
+    watch: bool,
+    interval: u64,
+) -> i32 {
+    let p = Palette::detect();
     let cfg = match load_config(cfg_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -275,11 +507,11 @@ fn cmd_status(cfg_path: Option<PathBuf>, as_json: bool, top: usize) -> i32 {
             return 1;
         }
     };
-    let snap = collect_snapshot(Some(&cfg.tmpfs.paths), true, true, true, true);
-    let top_procs = top_memory_processes(top);
-    let daemon_state = read_daemon_state(None);
 
     if as_json {
+        let snap = collect_snapshot(Some(&cfg.tmpfs.paths), true, true, true, true);
+        let top_procs = top_memory_processes(top);
+        let daemon_state = read_daemon_state(None);
         let payload = json!({
             "version": VERSION,
             "memory": {
@@ -326,94 +558,55 @@ fn cmd_status(cfg_path: Option<PathBuf>, as_json: bool, top: usize) -> i32 {
         return 0;
     }
 
-    let mem = &snap.memory;
-    println!("{}{}keep-ram-clean Status{}", c.bold, c.cyan, c.nc);
-    println!("{}", "-".repeat(58));
-    println!(
-        "Physical RAM  : {}{} / {} MiB{} ({:.1}% used, {} MiB available)",
-        c.bold,
-        mem.used_mb,
-        mem.total_mb,
-        c.nc,
-        mem.used_percent(),
-        mem.available_mb
-    );
-    println!(
-        "Caches / Slab : PageCache {} MiB | Reclaimable Slab {} MiB | Dirty {} MiB",
-        mem.cached_mb, mem.slab_reclaimable_mb, mem.dirty_mb
-    );
-    println!(
-        "Swap          : {}{} / {} MiB{} ({:.1}% used)",
-        c.bold,
-        mem.swap_used_mb,
-        mem.swap_total_mb,
-        c.nc,
-        mem.swap_used_percent()
-    );
-    for s in &snap.swaps {
-        let tag = if s.is_zram() { " [zram]" } else { "" };
-        println!("                  • {}{tag}: {}/{} MiB", s.path, s.used_mb, s.size_mb);
+    if !watch {
+        render_status_dashboard(&cfg, top, &p);
+        return 0;
     }
-    if snap.psi.available {
-        println!(
-            "Memory PSI    : some avg10={:.2} avg60={:.2} | full avg10={:.2} avg60={:.2}",
-            snap.psi.some_avg10, snap.psi.some_avg60, snap.psi.full_avg10, snap.psi.full_avg60
-        );
+
+    let sleep_secs = interval.max(1);
+    WATCH_STOP.store(false, Ordering::SeqCst);
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handle_watch_sigint as *const () as usize;
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
-    println!(
-        "CPU Load      : {:.2} {:.2} {:.2} ({} cores, ratio {:.2})",
-        snap.load_avg_1m,
-        snap.load_avg_5m,
-        snap.load_avg_15m,
-        snap.cpu_count,
-        snap.load_ratio()
-    );
-    if !snap.tmpfs_mounts.is_empty() {
-        println!("Monitored tmpfs:");
-        for m in &snap.tmpfs_mounts {
-            println!(
-                "  • {}: {}/{} MiB ({:.1}%)",
-                m.mountpoint,
-                m.used_mb,
-                m.total_mb,
-                m.used_percent()
-            );
+
+    let mut first = true;
+    while !WATCH_STOP.load(Ordering::SeqCst) {
+        if p.color {
+            if first {
+                print!("\x1b[2J\x1b[H");
+                first = false;
+            } else {
+                print!("\x1b[H\x1b[J");
+            }
         }
-    }
-    if !top_procs.is_empty() {
-        println!("Top {} Memory Consumers:", top_procs.len());
-        for p in &top_procs {
-            println!("  • PID {:<7} {:>8.1} MiB  {}", p.pid, p.rss_mb, p.comm);
-        }
-    }
-    println!("{}", "-".repeat(58));
-    if let Some(ds) = daemon_state.filter(|d| d.alive) {
+        render_status_dashboard(&cfg, top, &p);
         println!(
-            "Daemon        : {}RUNNING{} (PID {}, since {})",
-            c.green,
-            c.nc,
-            ds.pid,
-            fmt_ts(ds.started_at)
+            "\n{}{}{}\n{}  Refreshing every {}s · Press Ctrl+C to exit{}",
+            p.dim,
+            "─".repeat(BOX_WIDTH),
+            p.nc,
+            p.dim,
+            sleep_secs,
+            p.nc
         );
-        println!(
-            "Cleanups Run  : {} (cumulative +{} MiB RAM, -{} MiB swap)",
-            ds.cleanups_run, ds.total_ram_freed_mb, ds.total_swap_freed_mb
-        );
-        if let Some(last) = ds.last_cleanup {
-            println!(
-                "Last Cleanup  : {} — {}",
-                fmt_ts(last.finished_at),
-                last.reasons.join("; ")
-            );
+        let _ = std::io::stdout().flush();
+
+        // Sleep in small increments so Ctrl+C exits promptly
+        for _ in 0..(sleep_secs * 10) {
+            if WATCH_STOP.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-    } else {
-        println!("Daemon        : {}NOT RUNNING{}", c.yellow, c.nc);
     }
     0
 }
 
 fn cmd_doctor(cfg_path: Option<PathBuf>, as_json: bool) -> i32 {
-    let c = Palette::detect();
+    let p = Palette::detect();
     let cfg = match load_config(cfg_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -427,17 +620,28 @@ fn cmd_doctor(cfg_path: Option<PathBuf>, as_json: bool) -> i32 {
         println!("{}", serde_json::to_string_pretty(&payload).unwrap());
         return 0;
     }
-    println!("{}{}keep-ram-clean Doctor — System Memory Audit{}", c.bold, c.cyan, c.nc);
-    println!("{}", "-".repeat(58));
+
+    let warn_count = findings.iter().filter(|f| f.status == "warn").count();
+    let (badge, badge_col) = if warn_count == 0 {
+        ("✔ HEALTHY", p.green)
+    } else {
+        ("⚠ WARNINGS", p.yellow)
+    };
+    print_banner(&format!("keep-ram-clean v{VERSION} · Doctor"), badge, badge_col, &p);
+
+    print_section("KERNEL & VM AUDIT", &p);
     for f in &findings {
-        let icon = match f.status.as_str() {
-            "ok" => format!("{}✔{}", c.green, c.nc),
-            "warn" => format!("{}⚠{}", c.yellow, c.nc),
-            _ => format!("{}ℹ{}", c.cyan, c.nc),
+        let (icon, col) = match f.status.as_str() {
+            "ok" => ("✔", p.green),
+            "warn" => ("⚠", p.yellow),
+            _ => ("ℹ", p.cyan),
         };
-        println!(" {icon} {}{}{}: {}", c.bold, f.check, c.nc, f.detail);
+        println!(
+            "  {col}{icon}{} {}{}{}: {}",
+            p.nc, p.bold, f.check, p.nc, f.detail
+        );
         if !f.recommendation.is_empty() {
-            println!("     {}→ {}{}", c.dim, f.recommendation, c.nc);
+            println!("      {}→ {}{}", p.dim, f.recommendation, p.nc);
         }
     }
     0
@@ -511,7 +715,12 @@ fn main() -> ExitCode {
                 1
             }
         },
-        Commands::Status { json, top } => cmd_status(cli.config, json, top),
+        Commands::Status {
+            json,
+            top,
+            watch,
+            interval,
+        } => cmd_status(cli.config, json, top, watch, interval),
         Commands::Doctor { json } => cmd_doctor(cli.config, json),
         Commands::InitConfig { output, force } => cmd_init_config(output, force),
         Commands::Reload => match signal_daemon(libc::SIGHUP, "SIGHUP", None) {

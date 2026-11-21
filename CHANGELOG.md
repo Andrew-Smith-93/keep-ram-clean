@@ -2,6 +2,12 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.1.0] - 2026-11-20
+
+### Added
+- Upgraded terminal UI across `status`, `doctor`, and `run` with rounded Unicode banners, color-coded gauge bars for RAM/swap/`tmpfs`, inline RSS bars for top consumers, PSI status badges (`CALM` / `ELEVATED` / `PRESSURE`), and `● DAEMON RUNNING` / `○ DAEMON STOPPED` status pills (zero new dependencies; respects `NO_COLOR` and non-TTY pipes).
+- Live-refreshing dashboard mode: `keep-ram-clean status --watch [--interval N]`.
+
 ## [2.0.0] - 2026-11-19
 
 ### Changed
