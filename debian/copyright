@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: keep-ram-clean
-Upstream-Contact: Andrew Smith <137859776+Andrew-Smith-93@users.noreply.github.com>
+Upstream-Contact: Andrew Smith <andrewsmith.independent@gmail.com>
 Source: https://github.com/Andrew-Smith-93/keep-ram-clean
 
 Files: *

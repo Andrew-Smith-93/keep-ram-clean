@@ -1,7 +1,7 @@
 Source: keep-ram-clean
 Section: admin
 Priority: optional
-Maintainer: Andrew Smith <137859776+Andrew-Smith-93@users.noreply.github.com>
+Maintainer: Andrew Smith <andrewsmith.independent@gmail.com>
 Build-Depends:
  debhelper-compat (= 13),
  cargo,

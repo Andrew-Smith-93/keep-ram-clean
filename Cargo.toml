@@ -26,7 +26,7 @@ panic = "abort"
 strip = true
 
 [package.metadata.deb]
-maintainer = "Andrew Smith <137859776+Andrew-Smith-93@users.noreply.github.com>"
+maintainer = "Andrew Smith <andrewsmith.independent@gmail.com>"
 copyright = "2026, keep-ram-clean contributors"
 license-file = ["LICENSE", "0"]
 section = "admin"

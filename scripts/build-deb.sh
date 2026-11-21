@@ -49,7 +49,7 @@ Priority: optional
 Architecture: ${ARCH}
 Installed-Size: ${INSTALLED_KB}
 Depends: libc6 (>= 2.34)
-Maintainer: Andrew Smith <137859776+Andrew-Smith-93@users.noreply.github.com>
+Maintainer: Andrew Smith <andrewsmith.independent@gmail.com>
 Homepage: https://github.com/Andrew-Smith-93/keep-ram-clean
 Description: Configurable Linux RAM, tmpfs, swap, and memory-pressure daemon
  keep-ram-clean is a lightweight Rust daemon and CLI that monitors Linux memory
