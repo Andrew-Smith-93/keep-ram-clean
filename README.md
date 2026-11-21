@@ -62,8 +62,13 @@ This installs `~/.local/bin/keep-ram-clean`, creates `~/.config/keep-ram-clean/c
 ## Usage
 
 ```bash
-# Check live RAM, PSI, swap, tmpfs, top processes, and daemon status
+# Check live RAM, PSI, swap, tmpfs, auto-clean activity, and daemon status
 keep-ram-clean status [--top N] [--watch] [--interval SECS] [--json]
+
+# View or change auto-clean trigger & notification settings (auto-reloads daemon)
+keep-ram-clean config show
+keep-ram-clean config set ram-percent 75
+keep-ram-clean config set notify true
 
 # Audit Linux kernel VM configuration & memory health
 keep-ram-clean doctor [--json]

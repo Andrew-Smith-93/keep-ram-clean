@@ -14,22 +14,22 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
 use crate::cleaners::{run_cleanup, ALL_STEP_NAMES};
 use crate::config::{
-    default_user_config, expand_tilde, is_root, load_config, Config, DEFAULT_SYSTEM_CONFIG,
-    EXAMPLE_CONFIG_TOML,
+    default_user_config, expand_tilde, is_root, load_config, update_config_setting, Config,
+    DEFAULT_SYSTEM_CONFIG, EXAMPLE_CONFIG_TOML,
 };
 use crate::daemon::{read_daemon_state, signal_daemon, RamCleanDaemon, VERSION};
 use crate::doctor::run_doctor;
 use crate::metrics::{collect_snapshot, top_memory_processes};
 use crate::ui::{
-    fmt_mib, fmt_mib_f64, gauge_bar, mini_bar, print_banner, print_section, psi_badge,
-    truncate_str, Palette, BOX_WIDTH,
+    fmt_mib, fmt_mib_f64, gauge_bar, mini_bar, print_banner, print_panel, print_two_panels,
+    psi_badge, terminal_width, truncate_str, Palette, Panel, RawTerminalGuard,
 };
 
 static WATCH_STOP: AtomicBool = AtomicBool::new(false);
@@ -51,6 +51,13 @@ fn fmt_ts(ts: f64) -> String {
         tm.tm_min,
         tm.tm_sec
     )
+}
+
+fn fmt_hms(ts: f64) -> String {
+    let secs = ts as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
 #[derive(Parser)]
@@ -94,7 +101,7 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Show live RAM, PSI, swap, tmpfs, and daemon status
+    /// Show live RAM, PSI, swap, tmpfs, auto-clean activity, and daemon status
     Status {
         /// Output status as JSON
         #[arg(long)]
@@ -102,12 +109,17 @@ enum Commands {
         /// Number of top memory processes to display
         #[arg(long, default_value_t = 5)]
         top: usize,
-        /// Live-refreshing dashboard mode (Ctrl+C to exit)
+        /// Interactive live-refreshing dashboard mode (hotkeys: c, +/-, n, r, q)
         #[arg(short, long)]
         watch: bool,
         /// Refresh interval in seconds for --watch mode
         #[arg(long, default_value_t = 2)]
         interval: u64,
+    },
+    /// View or update auto-clean trigger and notification settings
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
     /// Audit kernel VM settings and memory health
     Doctor {
@@ -128,6 +140,19 @@ enum Commands {
     Reload,
     /// Send SIGUSR1 to running daemon for immediate cleanup
     Trigger,
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show current auto-clean trigger & notification settings
+    Show,
+    /// Update a setting and hot-reload the running daemon
+    Set {
+        /// Setting name (e.g. ram-percent, min-avail-mb, swap-percent, cooldown, interval, notify)
+        key: String,
+        /// New value (e.g. 75, 180, true, false)
+        value: String,
+    },
 }
 
 fn cmd_run(
@@ -203,6 +228,7 @@ fn cmd_run(
         return code;
     }
 
+    let w = terminal_width();
     let (badge, badge_col) = if report.dry_run {
         ("◎ DRY-RUN", p.yellow)
     } else if report.has_errors {
@@ -210,18 +236,17 @@ fn cmd_run(
     } else {
         ("✔ COMPLETE", p.green)
     };
-    print_banner(&format!("keep-ram-clean v{VERSION} · Cleanup"), badge, badge_col, &p);
-    println!(
-        "  {}Config:{} {}",
-        p.dim,
-        p.nc,
-        cfg.source_path
-            .as_ref()
-            .map(|c| c.display().to_string())
-            .unwrap_or_else(|| "built-in defaults".into())
+    let center = format!(
+        "RAM {} ({:+} MiB) │ Swap {} ({:+} MiB) │ {:.2}s",
+        fmt_mib(report.post_available_mb),
+        report.ram_freed_mb,
+        fmt_mib(report.post_swap_used_mb),
+        -report.swap_freed_mb,
+        report.duration_seconds
     );
+    print_banner(&format!("keep-ram-clean v{VERSION} · Cleanup"), &center, badge, badge_col, w, &p);
 
-    print_section("STEPS", &p);
+    let mut lines = Vec::new();
     for step in &report.steps {
         let (icon, col) = match step.status.as_str() {
             "ok" => ("✔", p.green),
@@ -229,69 +254,71 @@ fn cmd_run(
             "skipped" => ("–", p.yellow),
             _ => ("✖", p.red),
         };
-        println!(
-            "  {col}{icon}{} {}{:<12}{} {}",
+        lines.push(format!(
+            "{col}{icon}{} {}{:<12}{} {}",
             p.nc, p.bold, step.name, p.nc, step.summary
-        );
+        ));
         if verbose || report.dry_run || step.status == "error" {
             for d in &step.details {
-                println!("      {}• {d}{}", p.dim, p.nc);
+                lines.push(format!("    {}• {d}{}", p.dim, p.nc));
             }
         }
     }
-
-    print_section("SUMMARY", &p);
-    let ram_col = if report.ram_freed_mb > 0 {
-        p.green
-    } else {
-        p.dim
-    };
-    let swap_col = if report.swap_freed_mb > 0 {
-        p.green
-    } else {
-        p.dim
-    };
-    println!(
-        "  {:<14} {}{}{} {} (was {}, {ram_col}{:+} MiB{})",
-        "Available RAM",
-        p.bold,
-        fmt_mib(report.post_available_mb),
-        p.nc,
-        p.dim,
-        fmt_mib(report.pre_available_mb),
-        report.ram_freed_mb,
-        p.nc
-    );
-    println!(
-        "  {:<14} {}{}{} {} (was {}, {swap_col}{:+} MiB{})",
-        "Swap Used",
-        p.bold,
-        fmt_mib(report.post_swap_used_mb),
-        p.nc,
-        p.dim,
-        fmt_mib(report.pre_swap_used_mb),
-        -report.swap_freed_mb,
-        p.nc
-    );
-    println!("  {:<14} {:.2}s", "Elapsed", report.duration_seconds);
+    let cfg_label = cfg
+        .source_path
+        .as_ref()
+        .map(|c| c.display().to_string())
+        .unwrap_or_else(|| "built-in defaults".into());
+    print_panel("CLEANUP PIPELINE", &cfg_label, p.dim, &lines, w, &p);
     code
 }
 
-fn render_status_dashboard(cfg: &Config, top: usize, p: &Palette) {
+fn render_status_dashboard(
+    cfg: &Config,
+    top: usize,
+    p: &Palette,
+    toast: Option<&str>,
+    watch_mode: bool,
+    interval: u64,
+) {
+    let w = terminal_width();
+    let two_col = w >= 96;
+    let col_inner = if two_col {
+        ((w - 1) / 2).saturating_sub(4)
+    } else {
+        w.saturating_sub(4)
+    };
+    let bar_w = col_inner.saturating_sub(34).clamp(10, 26);
+
     let snap = collect_snapshot(Some(&cfg.tmpfs.paths), true, true, true, true);
     let top_procs = top_memory_processes(top);
     let daemon_state = read_daemon_state(None);
     let mem = &snap.memory;
     let t = &cfg.triggers;
 
-    let (badge, badge_col) = match daemon_state.as_ref().filter(|d| d.alive) {
-        Some(_) => ("● DAEMON RUNNING", p.green),
-        None => ("○ DAEMON STOPPED", p.yellow),
+    let cleaning_now = daemon_state
+        .as_ref()
+        .map(|d| d.alive && d.cleaning_now)
+        .unwrap_or(false);
+    let (badge, badge_col) = if cleaning_now {
+        ("⚡ AUTO-CLEANING", p.yellow)
+    } else if daemon_state.as_ref().map(|d| d.alive).unwrap_or(false) {
+        ("● DAEMON RUNNING", p.green)
+    } else {
+        ("○ DAEMON STOPPED", p.yellow)
     };
-    print_banner(&format!("keep-ram-clean v{VERSION}"), badge, badge_col, p);
 
-    // Memory & Swap
-    print_section("MEMORY & SWAP", p);
+    let center = format!(
+        "RAM {:.0}% ({} free) │ Swap {:.0}% │ Load {:.2}",
+        mem.used_percent(),
+        fmt_mib(mem.available_mb),
+        mem.swap_used_percent(),
+        snap.load_avg_1m
+    );
+    print_banner(&format!("keep-ram-clean v{VERSION}"), &center, badge, badge_col, w, p);
+
+    // --- Left Panel: MEMORY, SWAP & TMPFS ---
+    let mut left_lines: Vec<String> = Vec::new();
     let ram_pct = mem.used_percent();
     let ram_crit = if t.ram_used_percent > 0.0 {
         t.ram_used_percent
@@ -299,21 +326,18 @@ fn render_status_dashboard(cfg: &Config, top: usize, p: &Palette) {
         80.0
     };
     let ram_warn = (ram_crit - 15.0).max(50.0);
-    let ram_bar = gauge_bar(ram_pct, 24, ram_warn, ram_crit, p);
+    let ram_bar = gauge_bar(ram_pct, bar_w, ram_warn, ram_crit, p);
     let ram_col = p.severity_color(ram_pct, ram_warn, ram_crit);
-    println!(
-        "  {:<8} {ram_bar} {ram_col}{:>5.1}%{}  {}{} / {}{}  {}({} free){}",
+    left_lines.push(format!(
+        "{:<5} {ram_bar} {ram_col}{:>5.1}%{} {}{}/{}{}",
         "RAM",
         ram_pct,
         p.nc,
         p.bold,
         fmt_mib(mem.used_mb),
         fmt_mib(mem.total_mb),
-        p.nc,
-        p.dim,
-        fmt_mib(mem.available_mb),
         p.nc
-    );
+    ));
 
     let swap_pct = mem.swap_used_percent();
     let swap_crit = if t.swap_used_percent > 0.0 {
@@ -322,10 +346,10 @@ fn render_status_dashboard(cfg: &Config, top: usize, p: &Palette) {
         50.0
     };
     let swap_warn = (swap_crit - 20.0).max(20.0);
-    let swap_bar = gauge_bar(swap_pct, 24, swap_warn, swap_crit, p);
+    let swap_bar = gauge_bar(swap_pct, bar_w, swap_warn, swap_crit, p);
     let swap_col = p.severity_color(swap_pct, swap_warn, swap_crit);
-    println!(
-        "  {:<8} {swap_bar} {swap_col}{:>5.1}%{}  {}{} / {}{}",
+    left_lines.push(format!(
+        "{:<5} {swap_bar} {swap_col}{:>5.1}%{} {}{}/{}{}",
         "Swap",
         swap_pct,
         p.nc,
@@ -333,161 +357,260 @@ fn render_status_dashboard(cfg: &Config, top: usize, p: &Palette) {
         fmt_mib(mem.swap_used_mb),
         fmt_mib(mem.swap_total_mb),
         p.nc
-    );
+    ));
 
-    println!(
-        "  {}Caches   PageCache {} · Reclaimable Slab {} · Dirty {}{}",
+    let tmp_crit = if t.tmpfs_used_percent > 0.0 {
+        t.tmpfs_used_percent
+    } else {
+        70.0
+    };
+    let tmp_warn = (tmp_crit - 20.0).max(40.0);
+    for m in &snap.tmpfs_mounts {
+        let pct = m.used_percent();
+        let bar = gauge_bar(pct, bar_w, tmp_warn, tmp_crit, p);
+        let col = p.severity_color(pct, tmp_warn, tmp_crit);
+        left_lines.push(format!(
+            "{:<5} {bar} {col}{:>5.1}%{} {}/{}",
+            truncate_str(&m.mountpoint, 5),
+            pct,
+            p.nc,
+            fmt_mib(m.used_mb),
+            fmt_mib(m.total_mb)
+        ));
+    }
+
+    left_lines.push(format!(
+        "{}Cache{} {} │ {}Slab{} {} │ {}Dirty{} {}",
         p.dim,
+        p.nc,
         fmt_mib(mem.cached_mb),
+        p.dim,
+        p.nc,
         fmt_mib(mem.slab_reclaimable_mb),
-        fmt_mib(mem.dirty_mb),
-        p.nc
-    );
+        p.dim,
+        p.nc,
+        fmt_mib(mem.dirty_mb)
+    ));
 
     if !snap.swaps.is_empty() {
-        for s in &snap.swaps {
-            let tag = if s.is_zram() {
-                format!(" {}[zram]{}", p.cyan, p.nc)
-            } else {
-                String::new()
-            };
-            println!(
-                "  {}  ↳{} {}{tag}  {}{}/{}{}",
-                p.dim,
-                p.nc,
-                s.path,
-                p.dim,
-                fmt_mib(s.used_mb),
-                fmt_mib(s.size_mb),
-                p.nc
-            );
-        }
+        let dev_summary: Vec<String> = snap
+            .swaps
+            .iter()
+            .map(|s| {
+                let tag = if s.is_zram() { "[zram]" } else { "" };
+                format!(
+                    "{}{tag} {}/{}",
+                    s.path,
+                    fmt_mib(s.used_mb),
+                    fmt_mib(s.size_mb)
+                )
+            })
+            .collect();
+        left_lines.push(format!("{}Swaps{} {}", p.dim, p.nc, dev_summary.join(" · ")));
     }
 
-    // tmpfs mounts
-    if !snap.tmpfs_mounts.is_empty() {
-        print_section("TMPFS MOUNTS", p);
-        let tmp_crit = if t.tmpfs_used_percent > 0.0 {
-            t.tmpfs_used_percent
-        } else {
-            70.0
-        };
-        let tmp_warn = (tmp_crit - 20.0).max(40.0);
-        for m in &snap.tmpfs_mounts {
-            let pct = m.used_percent();
-            let bar = gauge_bar(pct, 24, tmp_warn, tmp_crit, p);
-            let col = p.severity_color(pct, tmp_warn, tmp_crit);
-            println!(
-                "  {:<8} {bar} {col}{:>5.1}%{}  {} / {}",
-                truncate_str(&m.mountpoint, 8),
-                pct,
-                p.nc,
-                fmt_mib(m.used_mb),
-                fmt_mib(m.total_mb)
-            );
-        }
-    }
-
-    // Pressure & Load
-    print_section("PRESSURE & LOAD", p);
+    // --- Right Panel: PRESSURE & TOP CONSUMERS ---
+    let mut right_lines: Vec<String> = Vec::new();
     if snap.psi.available {
-        let badge = psi_badge(
+        let pb = psi_badge(
             snap.psi.some_avg10,
             snap.psi.full_avg10,
             t.psi_some_avg10,
             t.psi_full_avg10,
             p,
         );
-        println!(
-            "  {:<8} {badge}  {}some{} avg10={:.2} avg60={:.2}  {}│{}  {}full{} avg10={:.2} avg60={:.2}",
-            "PSI",
-            p.bold,
-            p.nc,
+        right_lines.push(format!(
+            "PSI {pb}  some {:.2}/{:.2} │ full {:.2}/{:.2}  {}Load {:.2} ({}c){}",
             snap.psi.some_avg10,
             snap.psi.some_avg60,
-            p.dim,
-            p.nc,
-            p.bold,
-            p.nc,
             snap.psi.full_avg10,
-            snap.psi.full_avg60
-        );
+            snap.psi.full_avg60,
+            p.dim,
+            snap.load_avg_1m,
+            snap.cpu_count,
+            p.nc
+        ));
+    } else {
+        right_lines.push(format!(
+            "Load {:.2} {:.2} {:.2} ({} cores · ratio {:.2})",
+            snap.load_avg_1m,
+            snap.load_avg_5m,
+            snap.load_avg_15m,
+            snap.cpu_count,
+            snap.load_ratio()
+        ));
     }
-    let ratio = snap.load_ratio();
-    let load_col = p.severity_color(ratio * 100.0, 80.0, 120.0);
-    println!(
-        "  {:<8} {:.2}  {:.2}  {:.2}  {}({} cores · ratio {load_col}{:.2}{}{})",
-        "Load",
-        snap.load_avg_1m,
-        snap.load_avg_5m,
-        snap.load_avg_15m,
-        p.dim,
-        snap.cpu_count,
-        ratio,
+
+    let total_f = mem.total_mb.max(1) as f64;
+    let name_w = col_inner.saturating_sub(36).clamp(10, 18);
+    for proc in &top_procs {
+        let frac = proc.rss_mb / total_f;
+        let bar = mini_bar(frac, 8, p);
+        right_lines.push(format!(
+            "{}{:<7}{} {:<name_w$} {bar} {:>8} {}({:>4.1}%){}",
+            p.dim,
+            proc.pid,
+            p.nc,
+            truncate_str(&proc.comm, name_w),
+            fmt_mib_f64(proc.rss_mb),
+            p.dim,
+            frac * 100.0,
+            p.nc
+        ));
+    }
+
+    if two_col {
+        let free_badge = format!("{} free", fmt_mib(mem.available_mb));
+        let top_badge = format!("Top {}", top_procs.len());
+        print_two_panels(
+            &Panel {
+                title: "MEMORY · SWAP · TMPFS",
+                badge: &free_badge,
+                badge_col: p.green,
+                lines: &left_lines,
+            },
+            &Panel {
+                title: "PRESSURE & TOP CONSUMERS",
+                badge: &top_badge,
+                badge_col: p.cyan,
+                lines: &right_lines,
+            },
+            w,
+            p,
+        );
+    } else {
+        print_panel("MEMORY · SWAP · TMPFS", "", "", &left_lines, w, p);
+        print_panel("PRESSURE & TOP CONSUMERS", "", "", &right_lines, w, p);
+    }
+
+    // --- Bottom Full-Width Panel: AUTO-CLEAN VISUALS & TRIGGERS ---
+    let mut auto_lines: Vec<String> = Vec::new();
+    let notif_pill = if cfg.notifications.enabled {
+        format!("{}ON{}", p.green, p.nc)
+    } else {
+        format!("{}OFF{}", p.dim, p.nc)
+    };
+    let sched_str = if t.interval_minutes > 0 {
+        format!("Every {}m", t.interval_minutes)
+    } else if !t.schedules.is_empty() {
+        t.schedules.join(",")
+    } else {
+        "Reactive".to_string()
+    };
+    auto_lines.push(format!(
+        "{}Triggers{} RAM ≥ {}{:.0}%{} │ Avail ≤ {} │ Swap ≥ {:.0}% │ PSI ≥ {:.0}/{:.0} │ Cooldown {}s │ Mode {} │ Alerts {notif_pill}",
+        p.bold,
         p.nc,
-        p.dim
-    );
-    print!("{}", p.nc);
+        p.cyan,
+        t.ram_used_percent,
+        p.nc,
+        fmt_mib(t.min_available_mb),
+        t.swap_used_percent,
+        t.psi_some_avg10,
+        t.psi_full_avg10,
+        t.cooldown_seconds,
+        sched_str
+    ));
 
-    // Top consumers
-    if !top_procs.is_empty() {
-        print_section(&format!("TOP {} MEMORY CONSUMERS", top_procs.len()), p);
-        let total_f = mem.total_mb.max(1) as f64;
-        for proc in &top_procs {
-            let frac = proc.rss_mb / total_f;
-            let bar = mini_bar(frac, 12, p);
-            println!(
-                "  {}PID {:<7}{} {:<18} {bar} {:>9} {}({:>4.1}%){}",
-                p.dim,
-                proc.pid,
+    if let Some(ds) = daemon_state.as_ref().filter(|d| d.alive) {
+        if ds.cleaning_now {
+            let why = ds.cleaning_reason.as_deref().unwrap_or("Trigger fired");
+            auto_lines.push(format!(
+                "{}{}⚡ AUTO-CLEAN IN PROGRESS — {why}{}",
+                p.bold, p.yellow, p.nc
+            ));
+        } else {
+            auto_lines.push(format!(
+                "{}● Active{} PID {} (since {}) │ Cleanups: {}{}{} │ Total Freed: {}{:+} MiB RAM{}, {}{:+} MiB swap{}",
+                p.green,
                 p.nc,
-                truncate_str(&proc.comm, 18),
-                fmt_mib_f64(proc.rss_mb),
-                p.dim,
-                frac * 100.0,
+                ds.pid,
+                fmt_ts(ds.started_at),
+                p.bold,
+                ds.cleanups_run,
+                p.nc,
+                p.green,
+                ds.total_ram_freed_mb,
+                p.nc,
+                p.cyan,
+                -ds.total_swap_freed_mb,
                 p.nc
-            );
+            ));
         }
-    }
 
-    // Daemon
-    print_section("DAEMON", p);
-    if let Some(ds) = daemon_state.filter(|d| d.alive) {
-        println!(
-            "  {}● RUNNING{}  PID {}{}{}  {}· since {}{}",
-            p.green,
-            p.nc,
-            p.bold,
-            ds.pid,
-            p.nc,
-            p.dim,
-            fmt_ts(ds.started_at),
-            p.nc
-        );
-        println!(
-            "  Cleanups   {} run  {}· cumulative {}{:+} MiB RAM{}, {}{:+} MiB swap{}",
-            ds.cleanups_run,
-            p.dim,
-            p.green,
-            ds.total_ram_freed_mb,
-            p.dim,
-            p.cyan,
-            -ds.total_swap_freed_mb,
-            p.nc
-        );
-        if let Some(last) = ds.last_cleanup {
-            println!(
-                "  Last Run   {}  {}— {}{}",
-                fmt_ts(last.finished_at),
-                p.dim,
-                last.reasons.join("; "),
-                p.nc
-            );
+        let history: Vec<&daemon::LastCleanupState> = if !ds.recent_cleanups.is_empty() {
+            ds.recent_cleanups.iter().take(3).collect()
+        } else {
+            ds.last_cleanup.iter().collect()
+        };
+        if history.is_empty() {
+            auto_lines.push(format!(
+                "{}History{}  No auto-cleanups triggered yet — standing by (run 'keep-ram-clean trigger' or press 'c' in --watch to test)",
+                p.dim, p.nc
+            ));
+        } else {
+            for ev in history {
+                let step_icons: String = ev
+                    .steps
+                    .iter()
+                    .map(|s| match s.status.as_str() {
+                        "ok" => format!("{}✔{}{}", p.green, s.name, p.nc),
+                        "error" => format!("{}✖{}{}", p.red, s.name, p.nc),
+                        _ => format!("{}–{}{}", p.dim, s.name, p.nc),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                auto_lines.push(format!(
+                    "{}⚡ {}{}  {}{:+} MiB RAM{}  {}{:+} MiB swap{}  ({:.2}s)  {}  [{}]",
+                    p.cyan,
+                    fmt_hms(ev.finished_at),
+                    p.nc,
+                    if ev.ram_freed_mb > 0 { p.green } else { p.dim },
+                    ev.ram_freed_mb,
+                    p.nc,
+                    if ev.swap_freed_mb > 0 { p.cyan } else { p.dim },
+                    -ev.swap_freed_mb,
+                    p.nc,
+                    ev.duration_seconds,
+                    ev.reasons.join("; "),
+                    step_icons
+                ));
+            }
         }
     } else {
+        auto_lines.push(format!(
+            "{}○ Daemon not running{} — start with `keep-ram-clean daemon` or systemd service",
+            p.yellow, p.nc
+        ));
+    }
+
+    let (act_badge, act_col) = if cleaning_now {
+        ("⚡ CLEANING", p.yellow)
+    } else {
+        ("STANDBY", p.dim)
+    };
+    print_panel("AUTO-CLEAN ACTIVITY & TRIGGERS", act_badge, act_col, &auto_lines, w, p);
+
+    if let Some(msg) = toast {
+        println!("  {}{msg}{}", p.cyan, p.nc);
+    }
+    if watch_mode {
         println!(
-            "  {}○ NOT RUNNING{}  {}Start with: keep-ram-clean daemon (or systemd service){}",
-            p.yellow, p.nc, p.dim, p.nc
+            "  {}[c]{} Clean now   {}[+/-]{} RAM trigger ({:.0}%)   {}[n]{} Alerts   {}[r]{} Reload   {}[q]{} Quit   {}({}s refresh){}",
+            p.bold,
+            p.nc,
+            p.bold,
+            p.nc,
+            t.ram_used_percent,
+            p.bold,
+            p.nc,
+            p.bold,
+            p.nc,
+            p.bold,
+            p.nc,
+            p.dim,
+            interval,
+            p.nc
         );
     }
 }
@@ -500,7 +623,7 @@ fn cmd_status(
     interval: u64,
 ) -> i32 {
     let p = Palette::detect();
-    let cfg = match load_config(cfg_path.as_deref()) {
+    let mut cfg = match load_config(cfg_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -559,7 +682,7 @@ fn cmd_status(
     }
 
     if !watch {
-        render_status_dashboard(&cfg, top, &p);
+        render_status_dashboard(&cfg, top, &p, None, false, interval);
         return 0;
     }
 
@@ -572,8 +695,16 @@ fn cmd_status(
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
 
+    let term = RawTerminalGuard::enter();
     let mut first = true;
+    let mut toast: Option<(String, Instant)> = None;
+
     while !WATCH_STOP.load(Ordering::SeqCst) {
+        if let Some((_, exp)) = &toast {
+            if Instant::now() >= *exp {
+                toast = None;
+            }
+        }
         if p.color {
             if first {
                 print!("\x1b[2J\x1b[H");
@@ -582,27 +713,156 @@ fn cmd_status(
                 print!("\x1b[H\x1b[J");
             }
         }
-        render_status_dashboard(&cfg, top, &p);
-        println!(
-            "\n{}{}{}\n{}  Refreshing every {}s · Press Ctrl+C to exit{}",
-            p.dim,
-            "─".repeat(BOX_WIDTH),
-            p.nc,
-            p.dim,
+        render_status_dashboard(
+            &cfg,
+            top,
+            &p,
+            toast.as_ref().map(|(m, _)| m.as_str()),
+            true,
             sleep_secs,
-            p.nc
         );
         let _ = std::io::stdout().flush();
 
-        // Sleep in small increments so Ctrl+C exits promptly
-        for _ in 0..(sleep_secs * 10) {
-            if WATCH_STOP.load(Ordering::SeqCst) {
-                break;
+        let deadline = Instant::now() + Duration::from_secs(sleep_secs);
+        while Instant::now() < deadline && !WATCH_STOP.load(Ordering::SeqCst) {
+            if let Some(key) = term.poll_key(100) {
+                let msg = match key {
+                    b'q' | b'Q' | 3 => {
+                        WATCH_STOP.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    b'c' | b'C' => match signal_daemon(libc::SIGUSR1, "SIGUSR1", None) {
+                        Ok(m) => Some(format!("⚡ {m}")),
+                        Err(e) => Some(format!("✖ {e}")),
+                    },
+                    b'r' | b'R' => match signal_daemon(libc::SIGHUP, "SIGHUP", None) {
+                        Ok(m) => {
+                            if let Ok(reloaded) = load_config(cfg_path.as_deref()) {
+                                cfg = reloaded;
+                            }
+                            Some(format!("✔ {m}"))
+                        }
+                        Err(e) => Some(format!("✖ {e}")),
+                    },
+                    b'+' | b'=' => {
+                        let next = (cfg.triggers.ram_used_percent + 5.0).min(95.0);
+                        match update_config_setting(cfg_path.as_deref(), "ram-percent", &format!("{next:.0}")) {
+                            Ok((_, new_cfg, k, v)) => {
+                                cfg = new_cfg;
+                                let _ = signal_daemon(libc::SIGHUP, "SIGHUP", None);
+                                Some(format!("✔ Updated {k} = {v} & reloaded daemon"))
+                            }
+                            Err(e) => Some(format!("✖ {e}")),
+                        }
+                    }
+                    b'-' | b'_' => {
+                        let next = (cfg.triggers.ram_used_percent - 5.0).max(50.0);
+                        match update_config_setting(cfg_path.as_deref(), "ram-percent", &format!("{next:.0}")) {
+                            Ok((_, new_cfg, k, v)) => {
+                                cfg = new_cfg;
+                                let _ = signal_daemon(libc::SIGHUP, "SIGHUP", None);
+                                Some(format!("✔ Updated {k} = {v} & reloaded daemon"))
+                            }
+                            Err(e) => Some(format!("✖ {e}")),
+                        }
+                    }
+                    b'n' | b'N' => {
+                        let next = !cfg.notifications.enabled;
+                        match update_config_setting(cfg_path.as_deref(), "notify", if next { "true" } else { "false" }) {
+                            Ok((_, new_cfg, k, v)) => {
+                                cfg = new_cfg;
+                                let _ = signal_daemon(libc::SIGHUP, "SIGHUP", None);
+                                Some(format!("✔ Updated {k} = {v} & reloaded daemon"))
+                            }
+                            Err(e) => Some(format!("✖ {e}")),
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(m) = msg {
+                    toast = Some((m, Instant::now() + Duration::from_secs(4)));
+                    break; // Re-render immediately
+                }
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
     0
+}
+
+fn cmd_config(cfg_path: Option<PathBuf>, action: ConfigAction) -> i32 {
+    let p = Palette::detect();
+    match action {
+        ConfigAction::Show => {
+            let cfg = match load_config(cfg_path.as_deref()) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let w = terminal_width();
+            let src = cfg
+                .source_path
+                .as_ref()
+                .map(|c| c.display().to_string())
+                .unwrap_or_else(|| "built-in defaults".into());
+            print_banner(
+                &format!("keep-ram-clean v{VERSION} · Settings"),
+                &src,
+                "CONFIG",
+                p.cyan,
+                w,
+                &p,
+            );
+            let t = &cfg.triggers;
+            let n = &cfg.notifications;
+            let k = &cfg.kernel;
+            let lines = vec![
+                format!("{}{:<22} {:<16} {}{}", p.bold, "CLI KEY", "CURRENT", "DESCRIPTION", p.nc),
+                format!("{:<22} {:<16} {}", "ram-percent", format!("{:.1}%", t.ram_used_percent), "Auto-clean when RAM used >= this %"),
+                format!("{:<22} {:<16} {}", "min-avail-mb", format!("{} MiB", t.min_available_mb), "Auto-clean when available RAM <= MiB"),
+                format!("{:<22} {:<16} {}", "swap-percent", format!("{:.1}%", t.swap_used_percent), "Auto-clean when swap used >= this %"),
+                format!("{:<22} {:<16} {}", "tmpfs-percent", format!("{:.1}%", t.tmpfs_used_percent), "Auto-clean when /tmp tmpfs >= this %"),
+                format!("{:<22} {:<16} {}", "psi-some / psi-full", format!("{:.1} / {:.1}", t.psi_some_avg10, t.psi_full_avg10), "Linux PSI memory contention thresholds"),
+                format!("{:<22} {:<16} {}", "cooldown", format!("{}s", t.cooldown_seconds), "Minimum wait between auto-cleanups"),
+                format!("{:<22} {:<16} {}", "interval", format!("{}m", t.interval_minutes), "Proactive periodic cleanup interval (0=off)"),
+                format!("{:<22} {:<16} {}", "notify", if n.enabled { "true" } else { "false" }, "Desktop notification popup on auto-clean"),
+                format!("{:<22} {:<16} {}", "notify-min-mb", format!("{} MiB", n.min_freed_mb), "Minimum RAM freed to show notification"),
+                format!("{:<22} {:<16} {}", "drop-caches", k.drop_caches_level, "Kernel drop_caches level (0-3)"),
+                format!("{}Example: keep-ram-clean config set ram-percent 75  │  keep-ram-clean config set notify true{}", p.dim, p.nc),
+            ];
+            print_panel("AUTO-CLEAN & NOTIFICATION SETTINGS", "", "", &lines, w, &p);
+            0
+        }
+        ConfigAction::Set { key, value } => {
+            match update_config_setting(cfg_path.as_deref(), &key, &value) {
+                Ok((dest, _, canonical_key, formatted)) => {
+                    println!(
+                        "{}✔{} Updated {}{canonical_key}{} = {}{formatted}{} in {}",
+                        p.green,
+                        p.nc,
+                        p.bold,
+                        p.nc,
+                        p.cyan,
+                        p.nc,
+                        dest.display()
+                    );
+                    match signal_daemon(libc::SIGHUP, "SIGHUP", None) {
+                        Ok(msg) => println!("{}✔{} {msg}", p.green, p.nc),
+                        Err(_) => println!(
+                            "{}ℹ{} Daemon not running; setting will apply on next start.",
+                            p.dim, p.nc
+                        ),
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+    }
 }
 
 fn cmd_doctor(cfg_path: Option<PathBuf>, as_json: bool) -> i32 {
@@ -621,29 +881,28 @@ fn cmd_doctor(cfg_path: Option<PathBuf>, as_json: bool) -> i32 {
         return 0;
     }
 
+    let w = terminal_width();
     let warn_count = findings.iter().filter(|f| f.status == "warn").count();
     let (badge, badge_col) = if warn_count == 0 {
         ("✔ HEALTHY", p.green)
     } else {
         ("⚠ WARNINGS", p.yellow)
     };
-    print_banner(&format!("keep-ram-clean v{VERSION} · Doctor"), badge, badge_col, &p);
+    print_banner(&format!("keep-ram-clean v{VERSION} · Doctor"), "", badge, badge_col, w, &p);
 
-    print_section("KERNEL & VM AUDIT", &p);
+    let mut lines = Vec::new();
     for f in &findings {
         let (icon, col) = match f.status.as_str() {
             "ok" => ("✔", p.green),
             "warn" => ("⚠", p.yellow),
             _ => ("ℹ", p.cyan),
         };
-        println!(
-            "  {col}{icon}{} {}{}{}: {}",
-            p.nc, p.bold, f.check, p.nc, f.detail
-        );
+        lines.push(format!("{col}{icon}{} {}{}{}: {}", p.nc, p.bold, f.check, p.nc, f.detail));
         if !f.recommendation.is_empty() {
-            println!("      {}→ {}{}", p.dim, f.recommendation, p.nc);
+            lines.push(format!("    {}→ {}{}", p.dim, f.recommendation, p.nc));
         }
     }
+    print_panel("KERNEL & VM AUDIT", "", "", &lines, w, &p);
     0
 }
 
@@ -721,6 +980,7 @@ fn main() -> ExitCode {
             watch,
             interval,
         } => cmd_status(cli.config, json, top, watch, interval),
+        Commands::Config { action } => cmd_config(cli.config, action),
         Commands::Doctor { json } => cmd_doctor(cli.config, json),
         Commands::InitConfig { output, force } => cmd_init_config(output, force),
         Commands::Reload => match signal_daemon(libc::SIGHUP, "SIGHUP", None) {

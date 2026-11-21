@@ -84,7 +84,13 @@ pub struct DaemonState {
     pub cleanups_run: u64,
     pub total_ram_freed_mb: i64,
     pub total_swap_freed_mb: i64,
+    #[serde(default)]
+    pub cleaning_now: bool,
+    #[serde(default)]
+    pub cleaning_reason: Option<String>,
     pub last_cleanup: Option<LastCleanupState>,
+    #[serde(default)]
+    pub recent_cleanups: Vec<LastCleanupState>,
     #[serde(default)]
     pub alive: bool,
     #[serde(default)]
@@ -213,7 +219,10 @@ pub struct RamCleanDaemon {
     cleanups_run: u64,
     total_ram_freed_mb: i64,
     total_swap_freed_mb: i64,
+    cleaning_now: bool,
+    cleaning_reason: Option<String>,
     last_cleanup: Option<LastCleanupState>,
+    recent_cleanups: Vec<LastCleanupState>,
 }
 
 impl RamCleanDaemon {
@@ -237,7 +246,10 @@ impl RamCleanDaemon {
             cleanups_run: 0,
             total_ram_freed_mb: 0,
             total_swap_freed_mb: 0,
+            cleaning_now: false,
+            cleaning_reason: None,
             last_cleanup: None,
+            recent_cleanups: Vec::new(),
         }
     }
 
@@ -261,7 +273,10 @@ impl RamCleanDaemon {
             cleanups_run: self.cleanups_run,
             total_ram_freed_mb: self.total_ram_freed_mb,
             total_swap_freed_mb: self.total_swap_freed_mb,
+            cleaning_now: self.cleaning_now,
+            cleaning_reason: self.cleaning_reason.clone(),
             last_cleanup: self.last_cleanup.clone(),
+            recent_cleanups: self.recent_cleanups.clone(),
             alive: status == "running",
             state_file: String::new(),
         };
@@ -315,12 +330,18 @@ impl RamCleanDaemon {
     }
 
     fn execute_cleanup(&mut self, reasons: Vec<String>, critical: bool) {
+        let reason_summary = reasons.join("; ");
         eprintln!(
-            "[INFO] Triggering cleanup ({}){}",
-            reasons.join("; "),
+            "[INFO] Triggering cleanup ({reason_summary}){}",
             if critical { " [CRITICAL]" } else { "" }
         );
+        self.cleaning_now = true;
+        self.cleaning_reason = Some(reason_summary);
+        self.write_state("running");
+
         let report = run_cleanup(&self.config, reasons, self.dry_run, critical, None);
+        self.cleaning_now = false;
+        self.cleaning_reason = None;
         self.engine.record_cleanup(Instant::now());
         self.cleanups_run += 1;
         if report.ram_freed_mb > 0 {
@@ -343,7 +364,7 @@ impl RamCleanDaemon {
             -report.swap_freed_mb
         );
 
-        self.last_cleanup = Some(LastCleanupState {
+        let entry = LastCleanupState {
             finished_at: report.finished_at,
             duration_seconds: report.duration_seconds,
             reasons: report.reasons.clone(),
@@ -358,7 +379,10 @@ impl RamCleanDaemon {
                     summary: s.summary.clone(),
                 })
                 .collect(),
-        });
+        };
+        self.last_cleanup = Some(entry.clone());
+        self.recent_cleanups.insert(0, entry);
+        self.recent_cleanups.truncate(5);
         self.write_state("running");
         send_notification(&self.config, &report, critical);
     }
@@ -612,7 +636,10 @@ mod tests {
             cleanups_run: 0,
             total_ram_freed_mb: 0,
             total_swap_freed_mb: 0,
+            cleaning_now: false,
+            cleaning_reason: None,
             last_cleanup: None,
+            recent_cleanups: Vec::new(),
             alive: false,
             state_file: String::new(),
         };

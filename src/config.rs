@@ -2,8 +2,8 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use regex::Regex;
@@ -598,6 +598,188 @@ pub fn load_config(explicit: Option<&Path>) -> Result<Config, String> {
         return Err(format!("Invalid configuration:\n  - {}", errors.join("\n  - ")));
     }
     Ok(cfg)
+}
+
+/// Map friendly CLI setting names to `(section, key, toml_value_kind)`.
+pub fn resolve_setting_alias(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "ram-percent" | "triggers.ram_used_percent" => Some(("triggers", "ram_used_percent", "float")),
+        "min-avail-mb" | "triggers.min_available_mb" => Some(("triggers", "min_available_mb", "int")),
+        "swap-percent" | "triggers.swap_used_percent" => Some(("triggers", "swap_used_percent", "float")),
+        "swap-mb" | "triggers.swap_used_mb" => Some(("triggers", "swap_used_mb", "int")),
+        "tmpfs-percent" | "triggers.tmpfs_used_percent" => Some(("triggers", "tmpfs_used_percent", "float")),
+        "psi-some" | "triggers.psi_some_avg10" => Some(("triggers", "psi_some_avg10", "float")),
+        "psi-full" | "triggers.psi_full_avg10" => Some(("triggers", "psi_full_avg10", "float")),
+        "cooldown" | "triggers.cooldown_seconds" => Some(("triggers", "cooldown_seconds", "int")),
+        "poll" | "triggers.poll_interval_seconds" => Some(("triggers", "poll_interval_seconds", "int")),
+        "hysteresis" | "triggers.hysteresis_percent" => Some(("triggers", "hysteresis_percent", "float")),
+        "interval" | "triggers.interval_minutes" => Some(("triggers", "interval_minutes", "int")),
+        "load-limit" | "triggers.max_load_avg_ratio" => Some(("triggers", "max_load_avg_ratio", "float")),
+        "notify" | "notifications.enabled" => Some(("notifications", "enabled", "bool")),
+        "notify-min-mb" | "notifications.min_freed_mb" => Some(("notifications", "min_freed_mb", "int")),
+        "notify-critical-only" | "notifications.on_critical_only" => Some(("notifications", "on_critical_only", "bool")),
+        "drop-caches" | "kernel.drop_caches_level" => Some(("kernel", "drop_caches_level", "int")),
+        "drop-caches-critical-only" | "kernel.drop_caches_on_critical_only" => {
+            Some(("kernel", "drop_caches_on_critical_only", "bool"))
+        }
+        "cgroup-reclaim-mb" | "kernel.cgroup_reclaim_mb" => Some(("kernel", "cgroup_reclaim_mb", "int")),
+        "tmpfs-age" | "tmpfs.min_age_minutes" => Some(("tmpfs", "min_age_minutes", "int")),
+        _ => None,
+    }
+}
+
+fn format_toml_scalar(kind: &str, raw_val: &str) -> Result<String, String> {
+    let v = raw_val.trim();
+    match kind {
+        "bool" => match v.to_ascii_lowercase().as_str() {
+            "true" | "on" | "yes" | "1" => Ok("true".into()),
+            "false" | "off" | "no" | "0" => Ok("false".into()),
+            _ => Err(format!("Expected boolean (true/false/on/off), got '{raw_val}'")),
+        },
+        "int" => {
+            let n: i64 = v
+                .parse()
+                .map_err(|_| format!("Expected integer, got '{raw_val}'"))?;
+            Ok(n.to_string())
+        }
+        "float" => {
+            let f: f64 = v
+                .parse()
+                .map_err(|_| format!("Expected number, got '{raw_val}'"))?;
+            if !f.is_finite() {
+                return Err(format!("Expected finite number, got '{raw_val}'"));
+            }
+            if f.fract() == 0.0 {
+                Ok(format!("{f:.1}"))
+            } else {
+                Ok(format!("{f}"))
+            }
+        }
+        _ => Err(format!("Unsupported setting type '{kind}'")),
+    }
+}
+
+fn patch_toml_key(text: &str, section: &str, key: &str, formatted_val: &str) -> String {
+    let target_header = format!("[{section}]");
+    let mut out = Vec::new();
+    let mut in_section = false;
+    let mut section_found = false;
+    let mut replaced = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
+            if in_section && !replaced {
+                out.push(format!("{key} = {formatted_val}"));
+                replaced = true;
+            }
+            in_section = trimmed == target_header;
+            if in_section {
+                section_found = true;
+            }
+            out.push(line.to_string());
+            continue;
+        }
+        if in_section && !replaced && !trimmed.starts_with('#') {
+            if let Some((lhs, _)) = trimmed.split_once('=') {
+                if lhs.trim() == key {
+                    out.push(format!("{key} = {formatted_val}"));
+                    replaced = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if in_section && !replaced {
+        out.push(format!("{key} = {formatted_val}"));
+        replaced = true;
+    }
+    if !section_found && !replaced {
+        out.push(String::new());
+        out.push(target_header);
+        out.push(format!("{key} = {formatted_val}"));
+    }
+
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    joined
+}
+
+pub fn active_config_write_path(explicit: Option<&Path>) -> PathBuf {
+    if let Some(p) = explicit {
+        expand_tilde(p)
+    } else if is_root() {
+        PathBuf::from(DEFAULT_SYSTEM_CONFIG)
+    } else {
+        default_user_config()
+    }
+}
+
+/// Update a single setting in config.toml (creating from defaults if absent),
+/// validate the resulting TOML, and atomically write it back.
+pub fn update_config_setting(
+    explicit: Option<&Path>,
+    setting_name: &str,
+    raw_value: &str,
+) -> Result<(PathBuf, Config, String, String), String> {
+    let Some((section, key, kind)) = resolve_setting_alias(setting_name) else {
+        return Err(format!(
+            "Unknown setting '{setting_name}'. Try: ram-percent, min-avail-mb, swap-percent, \
+             tmpfs-percent, psi-some, psi-full, cooldown, interval, notify, notify-min-mb, \
+             notify-critical-only, drop-caches, cgroup-reclaim-mb"
+        ));
+    };
+    let formatted = format_toml_scalar(kind, raw_value)?;
+    let dest = active_config_write_path(explicit);
+    let root = is_root();
+
+    let existing = if fs::symlink_metadata(&dest).is_ok() {
+        read_config_text_secure(&dest, root)?
+    } else {
+        EXAMPLE_CONFIG_TOML.to_string()
+    };
+
+    let patched = patch_toml_key(&existing, section, key, &formatted);
+    let mut cfg: Config = toml::from_str(&patched)
+        .map_err(|e| format!("Updated config failed to parse: {e}"))?;
+    let errs = cfg.validate();
+    if !errs.is_empty() {
+        return Err(format!("Validation failed:\n  - {}", errs.join("\n  - ")));
+    }
+
+    if let Some(parent) = dest.parent() {
+        let dir_mode = if root { 0o755 } else { 0o700 };
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(dir_mode));
+    }
+
+    let file_mode = if root { 0o644 } else { 0o600 };
+    let tmp = dest.with_extension(format!("toml.{}.tmp", std::process::id()));
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .mode(file_mode)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)
+        .map_err(|e| format!("Cannot create temp config {}: {e}", tmp.display()))?;
+    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(file_mode))
+        .and_then(|()| file.write_all(patched.as_bytes()))
+        .and_then(|()| file.sync_all())
+    {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("Failed writing config: {e}"));
+    }
+    drop(file);
+    if let Err(e) = fs::rename(&tmp, &dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("Failed replacing {}: {e}", dest.display()));
+    }
+
+    cfg.source_path = Some(dest.clone());
+    Ok((dest, cfg, format!("{section}.{key}"), formatted))
 }
 
 #[cfg(test)]

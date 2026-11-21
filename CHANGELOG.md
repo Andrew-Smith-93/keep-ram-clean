@@ -2,6 +2,14 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.2.0] - 2026-11-20
+
+### Added
+- **Full-width 2-column consolidated dashboard**: Dynamically spans your full terminal width (`TIOCGWINSZ`) so `status` and `status --watch` fit on a single screen with zero vertical scrolling.
+- **Live auto-clean visual state & history**: Daemon publishes `cleaning_now`, `cleaning_reason`, and the last 5 `recent_cleanups` to `state.json`; dashboard displays a live `⚡ AUTO-CLEAN IN PROGRESS` banner and a recent auto-clean activity feed with per-step icons.
+- **CLI settings manager**: Added `keep-ram-clean config show` and `keep-ram-clean config set <key> <value>` (validates, saves atomically, and hot-reloads the running daemon via `SIGHUP`).
+- **Interactive hotkeys in `status --watch`**: `[c]` Clean now, `[+]/[-]` adjust RAM trigger ±5%, `[n]` toggle desktop notification alerts, `[r]` reload config, `[q]` quit.
+
 ## [2.1.0] - 2026-11-20
 
 ### Added
