@@ -936,6 +936,69 @@ impl<'a> Layout<'a> {
         result
     }
 
+    fn settings_note(&self, width: usize, label: &str, content: &str) -> Vec<String> {
+        let p = self.p;
+        let prefix = format!("{}{label:<7}{} {}│{} ", p.bold, p.nc, p.dim, p.nc);
+        let columns = self.width(&prefix);
+        if width <= columns + 12 {
+            return if label.is_empty() {
+                self.text(content, width)
+            } else {
+                self.text(&format!("{}{label}{}: {content}", p.bold, p.nc), width)
+            };
+        }
+        self.text(content, width - columns)
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| {
+                if i == 0 {
+                    format!("{prefix}{line}")
+                } else {
+                    format!("        {}│{} {line}", p.dim, p.nc)
+                }
+            })
+            .collect()
+    }
+
+    fn settings_note_group(&self, width: usize, label: &str, entries: &[String]) -> Vec<String> {
+        let joined = entries.join("  ·  ");
+        if entries.len() <= 1 || self.width(&joined) + 10 <= width {
+            self.settings_note(width, label, &joined)
+        } else {
+            entries
+                .iter()
+                .enumerate()
+                .flat_map(|(i, entry)| {
+                    self.settings_note(width, if i == 0 { label } else { "" }, entry)
+                })
+                .collect()
+        }
+    }
+
+    fn settings_keys(&self, width: usize, keys: &[(&str, &str)]) -> Vec<String> {
+        let p = self.p;
+        let mut rows = Vec::new();
+        let mut line = String::new();
+        for (key, action) in keys {
+            let item = format!("{}[{key}]{} {action}", p.cyan, p.nc);
+            if !line.is_empty() && self.width(&line) + 2 + self.width(&item) > width {
+                rows.push(std::mem::take(&mut line));
+            }
+            if self.width(&item) > width {
+                rows.extend(self.text(&item, width));
+            } else {
+                if !line.is_empty() {
+                    line.push_str("  ");
+                }
+                line.push_str(&item);
+            }
+        }
+        if !line.is_empty() {
+            rows.push(line);
+        }
+        rows
+    }
+
     pub(crate) fn settings(
         &self,
         cfg: &crate::Config,
@@ -1059,71 +1122,94 @@ impl<'a> Layout<'a> {
         );
         rows.extend(self.text(&format!("Source: {source}"), width));
         rows.extend(self.settings_grid(cfg, editor, width, interactive.then_some(page.selection)));
-        rows.extend(self.text("● Saved  ○ Built-in default  * Staged (not saved)", width));
+        rows.extend(self.settings_note(
+            width,
+            "Values",
+            "● Saved  ○ Built-in default  * Draft (not saved)",
+        ));
         let floor_key = crate::watch_editor::FIELDS[crate::watch_editor::FLOOR].0;
         let preset = match page.preset() {
             Some(preset) => format!(
-                "Recommended preset: {} MiB floor · {:.1} GiB RAM{}",
+                "Recommended: {} MiB floor · {:.1} GiB RAM · {}",
                 preset.floor_mib,
                 preset.ram_mib as f64 / 1024.0,
                 if editor
                     .map_or(cfg, |e| &e.draft.original)
                     .setting_explicit(floor_key)
                 {
-                    " · saved value unchanged"
+                    "saved value kept"
                 } else {
-                    " · not applied"
+                    "not applied"
                 }
             ),
-            None => "Recommended preset unavailable: RAM size unknown".into(),
+            None => "Unavailable: RAM size unknown".into(),
         };
-        rows.extend(self.text(&preset, width));
-        let on = |v| if v { "on" } else { "off" };
-        rows.extend(self.text(
-            &format!(
-                "Enabled: kernel {} · swap {} · tmpfs {} · caches {} · watchdog {}",
-                on(cfg.kernel.enabled),
-                on(cfg.swap.enabled),
-                on(cfg.tmpfs.enabled),
-                on(cfg.user_caches.enabled),
-                on(cfg.watchdog.enabled)
-            ),
-            width,
-        ));
+        rows.extend(self.settings_note(width, "Preset", &preset));
+        let mut enabled = Vec::new();
+        let mut disabled = Vec::new();
+        for (name, on) in [
+            ("kernel", cfg.kernel.enabled),
+            ("swap", cfg.swap.enabled),
+            ("tmpfs", cfg.tmpfs.enabled),
+            ("caches", cfg.user_caches.enabled),
+            ("watchdog", cfg.watchdog.enabled),
+        ] {
+            if on { &mut enabled } else { &mut disabled }.push(name);
+        }
+        let mut actions = Vec::new();
+        if !enabled.is_empty() {
+            actions.push(format!("On: {}", enabled.join(", ")));
+        }
+        if !disabled.is_empty() {
+            actions.push(format!("Off: {}", disabled.join(", ")));
+        }
+        rows.extend(self.settings_note_group(width, "Actions", &actions));
         let schedules = if cfg.triggers.schedules.is_empty() {
             "none".into()
         } else {
             escape_controls(&cfg.triggers.schedules.join(", "))
         };
-        rows.extend(self.text(
-            &format!(
-                "Schedules: {schedules}  │  Logging: {}",
-                escape_controls(&cfg.logging.level)
-            ),
+        rows.extend(self.settings_note_group(
             width,
+            "Other",
+            &[
+                format!("Schedules: {schedules}"),
+                format!("Log: {}", escape_controls(&cfg.logging.level)),
+            ],
         ));
         let focus = if let Some(editor) = editor {
             if !editor.note.is_empty() {
-                rows.extend(self.text(&escape_controls(&editor.note), width));
+                rows.extend(self.settings_note(width, "Draft", &escape_controls(&editor.note)));
             }
-            rows.extend(self.text(
-                "j/k Select  Enter Presets  w Review  Esc Discard  q Quit  * Staged",
+            rows.extend(self.settings_keys(
                 width,
+                &[
+                    ("j/k", "Select"),
+                    ("Enter", "Presets"),
+                    ("w", "Review"),
+                    ("Esc", "Discard"),
+                    ("q", "Quit"),
+                ],
             ));
             Some(">")
         } else {
             if !message.is_empty() {
-                rows.extend(self.text(&escape_controls(message), width));
+                rows.extend(self.settings_note(width, "Notice", &escape_controls(message)));
             }
             if interactive {
                 let enter = if cfg.source_path.is_some() {
-                    "Enter Presets"
+                    "Presets"
                 } else {
-                    "Enter Setup help"
+                    "Setup help"
                 };
-                rows.extend(self.text(
-                    &format!("j/k Select  {enter}  [s]/Esc Watch  [q] Quit"),
+                rows.extend(self.settings_keys(
                     width,
+                    &[
+                        ("j/k", "Select"),
+                        ("Enter", enter),
+                        ("s/Esc", "Watch"),
+                        ("q", "Quit"),
+                    ],
                 ));
                 Some(">")
             } else {
@@ -1409,7 +1495,7 @@ mod tests {
                 "SOURCE-END.toml",
                 "RAMused87%",
                 "Desktopnoticeson",
-                "[s]/EscWatch",
+                "[s/Esc]Watch",
                 "[q]Quit",
             ] {
                 assert!(values.contains(item), "{item}: {values}");
@@ -1420,6 +1506,43 @@ mod tests {
             .settings(&cfg, (80, 0), false, None, "", &mut SettingsPage::default())
             .join("")
             .contains("[q]"));
+    }
+
+    #[test]
+    fn watch_settings_footer_wraps_long_values_without_splitting_keycaps() {
+        for color in [false, true] {
+            let p = palette(color);
+            let layout = Layout::new(&p);
+            let long = format!(
+                "Schedules: {} SCHEDULE-END · Log: DEBUG",
+                "abc, ".repeat(30)
+            );
+            for width in [18, 38, 80, 200] {
+                let notes = layout.settings_note(width, "Other", &long);
+                let keys = layout.settings_keys(
+                    width,
+                    &[
+                        ("j/k", "Select"),
+                        ("Enter", "Presets"),
+                        ("s/Esc", "Watch"),
+                        ("q", "Quit"),
+                    ],
+                );
+                assert!(notes
+                    .iter()
+                    .chain(&keys)
+                    .all(|line| layout.width(line) <= width));
+                assert!(notes.join("").contains("SCHEDULE-END"));
+                for key in [
+                    "[j/k] Select",
+                    "[Enter] Presets",
+                    "[s/Esc] Watch",
+                    "[q] Quit",
+                ] {
+                    assert!(visible(&layout, &keys.join(" ")).contains(key));
+                }
+            }
+        }
     }
 
     #[test]
