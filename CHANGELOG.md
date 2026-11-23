@@ -7,6 +7,8 @@ All notable changes to `keep-ram-clean` will be documented in this file.
 ### Changed
 - Restyled the Watch dashboard with compact, responsive tables for resource
   usage, swap devices, pressure, top consumers, and cleanup activity.
+- Shared section dividers and meter rails reduce vertical space without
+  hiding readings or removing the meters' top and bottom borders.
 
 ### Added
 - Watch Settings (`s` or `status --watch --view config`) shows the file or

@@ -1,6 +1,7 @@
 keep-ram-clean (2.3.1-1) UNRELEASED; urgency=medium
 
-  * Restyle Watch with compact tables and add a staged Settings editor.
+  * Restyle Watch with compact tables and shared section and meter rails.
+  * Add a staged Settings editor: presets and Off/On first, with Manual entry.
   * Preview a per-system available-RAM floor without changing runtime defaults.
 
  -- Andrew Smith <andrewsmith.independent@gmail.com>  Mon, 23 Nov 2026 15:26:09 -0600

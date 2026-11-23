@@ -6,30 +6,37 @@ A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linu
 
 ---
 
-## Try v2.3.0 without installing it
+## Try v2.3.1 without installing it
 
 On **Debian 12 (Bookworm), amd64**, download the `.deb`, `.provenance`, and
-`.sha256` files from the [v2.3.0 release](https://github.com/Andrew-Smith-93/keep-ram-clean/releases/tag/v2.3.0)
-into the same directory. In that directory, run as your normal user:
+`.sha256` files from the [v2.3.1 release](https://github.com/Andrew-Smith-93/keep-ram-clean/releases/tag/v2.3.1)
+into the same directory. Run as your normal user:
 
 ```sh
 (
   set -eu
-  sha256sum -c keep-ram-clean_2.3.0-1_amd64.sha256
+  sha256sum --strict -c keep-ram-clean_2.3.1-1_amd64.sha256
   trial_dir=$(mktemp -d)
-  dpkg-deb -x keep-ram-clean_2.3.0-1_amd64.deb "$trial_dir"
-  "$trial_dir/usr/bin/keep-ram-clean" --version
-  "$trial_dir/usr/bin/keep-ram-clean" pressure-watch --help
+  dpkg-deb -x keep-ram-clean_2.3.1-1_amd64.deb "$trial_dir"
+  bin="$trial_dir/usr/bin/keep-ram-clean"
+  "$bin" --version
+  "$bin" status --help
+  "$bin" pressure-watch --help
+  printf '%s\n' '# Disposable Watch Settings trial' > "$trial_dir/settings.toml"
   printf 'Extracted files: %s\n' "$trial_dir"
+  "$bin" --config "$trial_dir/settings.toml" status --watch --view config
 )
 ```
 
-This smoke test runs only version and help: no `sudo`, package installation,
-services, cleanup, or process signaling. You can delete the temporary directory
-afterward. To try monitoring with a dedicated workload you own, use the
+In Settings, press `e`, select a field with `j`/`k`, and press Enter to see
+presets. Press `m` for manual entry, or `q` to exit. Saving in this trial only
+edits the temporary file; there is no installation or daemon reload. You can
+delete the temporary directory after the trial.
+
+To try monitoring a dedicated workload you own, use the
 [report-only workflow below](#opt-in-memory-pressure-relief) with the extracted
-binary, without `--terminate`. No need to create memory pressure on your machine;
-without sustained pressure, you won't see a recommendation.
+binary, without `--terminate`. The help command above does not monitor or signal
+any workload.
 
 ## Key Features
 
