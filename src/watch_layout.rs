@@ -726,66 +726,119 @@ impl<'a> Layout<'a> {
     ) -> Vec<String> {
         use crate::watch_editor::{display_value, values, GROUPS, LABELS};
         let p = self.p;
-        let value = values(editor.map_or(cfg, |e| &e.draft.proposed));
+        let proposed = values(editor.map_or(cfg, |e| &e.draft.proposed));
+        let shown =
+            std::array::from_fn::<_, { LABELS.len() }, _>(|id| display_value(id, &proposed[id]));
         let original = editor.map(|e| values(&e.draft.original));
         let selected = editor.and_then(crate::watch_editor::Editor::selecting);
-        let lane = |groups: &[(&str, &[usize])], w| {
-            let label_width = groups
+        let label = |id: usize| {
+            let focused = Some(id) == selected;
+            let changed = original
+                .as_ref()
+                .is_some_and(|previous| previous[id] != proposed[id]);
+            let arrow = if focused { '>' } else { ' ' };
+            let star = if changed { '*' } else { ' ' };
+            let color = if focused {
+                p.cyan
+            } else if changed {
+                p.yellow
+            } else {
+                ""
+            };
+            format!("{color}{arrow}{star} {}{}", LABELS[id], p.nc)
+        };
+        let sizes = |groups: &[(&str, &[usize])]| {
+            let labels = 3 + groups
                 .iter()
-                .flat_map(|(_, ids)| *ids)
-                .map(|&i| self.width(LABELS[i]))
+                .flat_map(|(heading, ids)| {
+                    std::iter::once(self.width(heading))
+                        .chain(ids.iter().map(|&id| self.width(LABELS[id])))
+                })
                 .max()
                 .unwrap_or(0);
-            let mut rows = Vec::new();
-            for (section, ids) in groups {
-                rows.extend(self.text(&format!("{}{section}{}", p.bold, p.nc), w));
-                for &id in *ids {
-                    let focused = Some(id) == selected;
-                    let changed = original
-                        .as_ref()
-                        .is_some_and(|previous| previous[id] != value[id]);
-                    let arrow = if focused { '>' } else { ' ' };
-                    let star = if changed { '*' } else { ' ' };
-                    let color = if focused {
-                        p.cyan
-                    } else if changed {
-                        p.yellow
-                    } else {
-                        ""
-                    };
-                    let label = LABELS[id];
-                    let value = display_value(id, &value[id]);
-                    rows.extend(self.text(
-                        &format!(
-                            "{color}{arrow}{star} {label:<label_width$} │ {value}{}",
-                            p.nc
-                        ),
-                        w,
-                    ));
-                }
-            }
-            rows
+            let values = groups
+                .iter()
+                .flat_map(|(_, ids)| ids.iter().map(|&id| self.width(&shown[id])))
+                .max()
+                .unwrap_or(0)
+                .max(5); // VALUE header
+            (labels, values)
         };
-        if width >= 62 {
-            let left_width = (width - 3) / 2;
-            let right_width = width - 3 - left_width;
-            let mut left = lane(&GROUPS[..2], left_width);
-            let mut right = lane(&GROUPS[2..], right_width);
+        const DIVIDER: usize = 3; // " │ "
+        const GUTTER: usize = 4;
+        let lane =
+            |groups: &[(&str, &[usize])], labels: usize, values: usize| {
+                let aligned = |field: &str, value: &str| {
+                    format!(
+                        "{field}{} │ {value}",
+                        " ".repeat(labels.saturating_sub(self.width(field)))
+                    )
+                };
+                let mut rows = Vec::new();
+                for (heading, ids) in groups {
+                    rows.push(aligned(
+                        &format!("   {}{heading}{}", p.bold, p.nc),
+                        &format!("{}VALUE{}", p.bold, p.nc),
+                    ));
+                    rows.push(format!("{}─┼─{}", "─".repeat(labels), "─".repeat(values)));
+                    for &id in *ids {
+                        let field = label(id);
+                        rows.extend(self.text(&shown[id], values).iter().enumerate().map(
+                            |(line, value)| aligned(if line == 0 { &field } else { "" }, value),
+                        ));
+                    }
+                }
+                rows
+            };
+        let (left_groups, right_groups) = GROUPS.split_at(2);
+        let (left_labels, left_values) = sizes(left_groups);
+        let (right_labels, right_values) = sizes(right_groups);
+        let min_pair = left_labels + right_labels + 2 * (DIVIDER + 5) + GUTTER;
+        if width >= min_pair {
+            // Keep both lanes at their natural width. When a value really is
+            // long, reclaim only actual spare columns, then wrap what remains.
+            let spare = width - min_pair;
+            let left_wants = left_values - 5;
+            let right_wants = right_values - 5;
+            let left_extra = left_wants.min(spare - right_wants.min(spare / 2));
+            let right_extra = right_wants.min(spare - left_extra);
+            let left_width = left_labels + DIVIDER + 5 + left_extra;
+            let mut left = lane(left_groups, left_labels, 5 + left_extra);
+            let mut right = lane(right_groups, right_labels, 5 + right_extra);
             let lines = left.len().max(right.len());
             left.resize(lines, String::new());
             right.resize(lines, String::new());
             left.into_iter()
                 .zip(right)
-                .map(|(left, right)| match (left.is_empty(), right.is_empty()) {
-                    (_, true) => left,
-                    _ => format!(
-                        "{left}{} │ {right}",
-                        " ".repeat(left_width.saturating_sub(self.width(&left)))
-                    ),
+                .map(|(left, right)| {
+                    if right.is_empty() {
+                        left
+                    } else {
+                        format!(
+                            "{left}{}{right}",
+                            " ".repeat(left_width - self.width(&left) + GUTTER)
+                        )
+                    }
                 })
                 .collect()
         } else {
-            lane(&GROUPS, width)
+            let (labels, values) = sizes(&GROUPS);
+            if width >= labels + DIVIDER + 5 {
+                lane(&GROUPS, labels, values.min(width - labels - DIVIDER))
+            } else {
+                // On truly tiny terminals prefer a wrapped, labeled field
+                // over squeezing it into two illegibly narrow columns.
+                GROUPS
+                    .iter()
+                    .flat_map(|(heading, ids)| {
+                        let mut rows = self.text(&format!("{}{heading}{}", p.bold, p.nc), width);
+                        for &id in *ids {
+                            rows.extend(self.text(&format!("{}: {}", label(id), shown[id]), width));
+                        }
+                        rows
+                    })
+                    .collect()
+            }
         }
     }
 
@@ -811,7 +864,7 @@ impl<'a> Layout<'a> {
                     rows.iter().position(|row| {
                         if anchor == ">" {
                             row.starts_with('>')
-                                || row.contains("│ >")
+                                || row.contains("    >")
                                 || row.contains("\x1b[0;36m>")
                         } else {
                             row.starts_with(anchor) || row.contains(anchor)
@@ -1215,6 +1268,42 @@ mod tests {
             .settings(&cfg, (80, 0), false, None, "", &mut SettingsPage::default())
             .join("")
             .contains("[q]"));
+    }
+
+    #[test]
+    fn watch_settings_tables_use_natural_content_width() {
+        use crate::watch_editor::{GROUPS, LABELS};
+        let cfg = crate::Config::default();
+        for color in [false, true] {
+            let p = palette(color);
+            let layout = Layout::new(&p);
+            let grid = layout.settings_grid(&cfg, None, 80);
+            assert_eq!(grid, layout.settings_grid(&cfg, None, 120));
+            assert_eq!(grid, layout.settings_grid(&cfg, None, 200));
+            assert!(grid.iter().map(|row| layout.width(row)).max().unwrap() <= 72);
+            for (heading, _) in GROUPS {
+                let row = grid.iter().position(|row| row.contains(heading)).unwrap();
+                assert!(grid[row].contains("VALUE") && grid[row + 1].contains('┼'));
+            }
+            for label in LABELS {
+                assert!(grid.iter().any(|row| row.contains(label)), "{label}");
+            }
+            // An unusually precise value expands when there is room and
+            // wraps in tight lanes, rather than being shortened or cropped.
+            let mut cfg = cfg.clone();
+            cfg.triggers.max_load_avg_ratio = 1.2345678901234566E-100;
+            let raw = cfg.triggers.max_load_avg_ratio.to_string();
+            for width in [38, 64, 80, 200] {
+                let rows = layout.settings_grid(&cfg, None, width);
+                assert!(rows.iter().all(|row| layout.width(row) <= width));
+                // Left lane may have unrelated rows beside the wrapped value.
+                let text = rows
+                    .iter()
+                    .map(|row| row.rsplit('│').next().unwrap().trim())
+                    .collect::<String>();
+                assert!(text.contains(&raw), "{width}: {text}");
+            }
+        }
     }
 
     #[test]
