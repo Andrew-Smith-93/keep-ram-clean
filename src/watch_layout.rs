@@ -971,6 +971,70 @@ impl<'a> Layout<'a> {
                 || "built-in defaults".into(),
                 |path| escape_controls(&path.display().to_string()),
             );
+        if let Some(editor) = editor {
+            use crate::watch_editor::{display_value, source, values, FIELDS, LABELS};
+            if let Some(index) = editor.selecting() {
+                let current = display_value(index, &values(&editor.draft.proposed)[index]);
+                let origin = match source(&editor.draft.original, index, Some(editor)) {
+                    'F' => "file",
+                    'P' => "preset draft",
+                    'M' => "manual draft",
+                    _ => "built-in",
+                };
+                let current = format!("{}  │  Current ({origin}): {current}", LABELS[index]);
+                if let Some((choices, selected)) = editor.choices() {
+                    let mut rows = self.text("WATCH SETTINGS  │  PRESETS  │  NO AUTO-SAVE", width);
+                    rows.extend(self.text(&current, width));
+                    let options = choices
+                        .iter()
+                        .enumerate()
+                        .map(|(i, choice)| {
+                            let marker = if i == selected { ">" } else { " " };
+                            let detail = if choice.system {
+                                " (system recommendation)"
+                            } else {
+                                ""
+                            };
+                            let value = match choice.raw.as_str() {
+                                "true" => "On".into(),
+                                "false" => "Off".into(),
+                                _ => display_value(index, &choice.raw),
+                            };
+                            vec![format!("{marker} {value}{detail}")]
+                        })
+                        .collect::<Vec<_>>();
+                    // A one-column table keeps the selected option and its
+                    // meaning together at normal and narrow terminal sizes.
+                    rows.extend(self.table("CHOOSE A VALUE", &["PRESET"], &options, width));
+                    if !editor.note.is_empty() {
+                        rows.extend(self.text(&escape_controls(&editor.note), width));
+                    }
+                    rows.extend(
+                        self.text("j/k Pick  Enter Stage  m Manual  Esc Back  q Quit", width),
+                    );
+                    return self.settings_page(rows, width, height, page, Some("> "));
+                }
+                if let Some(input) = editor.editing_value() {
+                    let mut rows = self.text("WATCH SETTINGS  │  MANUAL  │  NO AUTO-SAVE", width);
+                    rows.extend(self.text(&current, width));
+                    rows.extend(self.text(
+                        &format!(
+                            "Manual: {} ({}) = {}",
+                            LABELS[index],
+                            FIELDS[index].1,
+                            escape_controls(input)
+                        ),
+                        width,
+                    ));
+                    if !editor.note.is_empty() {
+                        rows.extend(self.text(&escape_controls(&editor.note), width));
+                    }
+                    rows.extend(self.text("Enter Stage  p / Esc Presets  q Quit", width));
+                    return self.settings_page(rows, width, height, page, Some("Manual:"));
+                }
+            }
+        }
+
         let badge = if editor.is_some() {
             "NO AUTO-SAVE"
         } else {
@@ -1035,26 +1099,11 @@ impl<'a> Layout<'a> {
             if !editor.note.is_empty() {
                 rows.extend(self.text(&escape_controls(&editor.note), width));
             }
-            if let (Some(input), Some(index)) = (editor.editing_value(), editor.selecting()) {
-                use crate::watch_editor::{FIELDS, LABELS};
-                rows.extend(self.text(
-                    &format!(
-                        "Editing: {} ({}) = {}",
-                        LABELS[index],
-                        FIELDS[index].1,
-                        escape_controls(input)
-                    ),
-                    width,
-                ));
-                rows.extend(self.text("Enter stages; Esc cancels this input.", width));
-                Some("Editing:")
-            } else {
-                rows.extend(self.text(
-                    "j/k Select  Enter Manual  p Preset  w Review  Esc Discard  q Quit  * Staged",
-                    width,
-                ));
-                Some(">")
-            }
+            rows.extend(self.text(
+                "j/k Select  Enter Presets  w Review  Esc Discard  q Quit  * Staged",
+                width,
+            ));
+            Some(">")
         } else {
             if !message.is_empty() {
                 rows.extend(self.text(&escape_controls(message), width));

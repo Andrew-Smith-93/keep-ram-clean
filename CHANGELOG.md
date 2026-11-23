@@ -10,8 +10,9 @@ All notable changes to `keep-ram-clean` will be documented in this file.
 
 ### Added
 - Watch Settings (`s` or `status --watch --view config`) shows the file or
-  built-in source of each editable value. Stage exact edits, review them, and
-  save atomically without reloading the daemon.
+  built-in source of each editable value. Choose a preset or Off/On first,
+  or switch to Manual for an exact value. Review staged changes and save
+  atomically without reloading the daemon.
 - Settings previews a physical-RAM-based Available floor preset. It does not
   replace explicit values unless selected, reviewed, and saved. Runtime defaults
   and daemon behavior are unchanged.

@@ -130,13 +130,67 @@ impl SystemPreset {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EditSource {
+    Preset { system: bool },
+    Manual,
+}
+
+pub(crate) struct Choice {
+    pub(crate) raw: String,
+    pub(crate) system: bool,
+}
+
+// Common choices (not policy): "on" is never applied simply by opening this
+// picker, and each selection still goes through full config validation.
+fn field_choices(index: usize, machine: Option<SystemPreset>) -> Vec<Choice> {
+    const MENU: [&[&str]; FIELDS.len()] = [
+        &["0", "70", "75", "80", "85", "90", "95"],  // RAM used %
+        &["0", "128", "256", "512", "1024", "1536"], // available floor
+        &["0", "25", "50", "65", "75", "90"],        // swap used %
+        &["0", "128", "256", "512", "1024", "2048"], // swap used MiB
+        &["0", "50", "60", "70", "80", "90"],        // tmpfs used %
+        &["0", "2", "5", "10", "15", "20"],          // PSI some
+        &["0", "0.5", "1", "2", "5", "10"],          // PSI full
+        &["0", "30", "60", "120", "300", "600"],     // cooldown
+        &["1", "5", "10", "15", "30", "60"],         // poll (never zero)
+        &["0", "2", "5", "10", "20", "50"],          // re-arm margin <= 50
+        &["0", "5", "15", "30", "60", "120"],        // periodic
+        &["0", "0.5", "1", "1.5", "2"],              // load ratio
+        &["false", "true"],                          // desktop notices
+        &["0", "50", "100", "256", "512"],           // free before notice
+        &["false", "true"],                          // notices critical-only
+        &["0", "1", "2", "3"],                       // drop-caches valid levels
+        &["false", "true"],                          // drop-caches critical-only
+        &["0", "128", "256", "512", "1024", "2048"], // cgroup reclaim
+        &["0", "5", "15", "30", "60", "120"],        // tmpfs min age
+    ];
+    let mut out: Vec<_> = MENU[index]
+        .iter()
+        .map(|s| Choice {
+            raw: (*s).into(),
+            system: false,
+        })
+        .collect();
+    if let Some(machine) = machine.filter(|_| index == FLOOR) {
+        let raw = machine.floor_mib.to_string();
+        if let Some(choice) = out.iter_mut().find(|choice| choice.raw == raw) {
+            choice.system = true;
+        } else {
+            let at = out
+                .partition_point(|choice| choice.raw.parse::<u64>().unwrap() < machine.floor_mib);
+            out.insert(at, Choice { raw, system: true });
+        }
+    }
+    out
+}
+
 pub(crate) fn source(cfg: &Config, index: usize, editor: Option<&Editor>) -> char {
     let key = FIELDS[index].0;
     if let Some(editor) = editor.filter(|editor| editor.draft.has_staged(key)) {
-        return if index == FLOOR && editor.preset_staged {
-            'P'
-        } else {
-            'M'
+        return match editor.staged_source[index] {
+            Some(EditSource::Preset { .. }) => 'P',
+            _ => 'M',
         };
     }
     if cfg.setting_explicit(key) {
@@ -149,7 +203,8 @@ pub(crate) fn source(cfg: &Config, index: usize, editor: Option<&Editor>) -> cha
 #[derive(PartialEq, Eq)]
 enum Mode {
     Browse,
-    Value,
+    Presets,
+    Manual,
     Confirm,
 }
 
@@ -170,7 +225,9 @@ pub(crate) struct Editor {
     review_seen: usize,
     pub(crate) note: String,
     preset: Option<SystemPreset>,
-    preset_staged: bool,
+    staged_source: [Option<EditSource>; FIELDS.len()],
+    choices: Vec<Choice>,
+    choice_index: usize,
 }
 
 impl Editor {
@@ -184,7 +241,9 @@ impl Editor {
             review_seen: 0,
             note: String::new(),
             preset,
-            preset_staged: false,
+            staged_source: [None; FIELDS.len()],
+            choices: Vec::new(),
+            choice_index: 0,
         })
     }
 
@@ -196,32 +255,62 @@ impl Editor {
             .collect()
     }
 
-    fn stage_preset(&mut self) {
-        let key = FIELDS[FLOOR].0;
-        if self.selected != FLOOR {
-            self.note = "Select Available floor to choose the system preset.".into();
-            return;
-        }
-        let Some(preset) = self.preset else {
-            self.note = "RAM size unavailable; preset not staged.".into();
-            return;
+    fn open_presets(&mut self) {
+        self.choices = field_choices(self.selected, self.preset);
+        let key = FIELDS[self.selected].0;
+        let current = &values(&self.draft.proposed)[self.selected];
+        let system_first =
+            !self.draft.original.setting_explicit(key) && !self.draft.has_staged(key);
+        let exact = || {
+            self.choices
+                .iter()
+                .position(|choice| &choice.raw == current)
         };
-        if self.draft.original.setting_explicit(key)
-            && self.draft.original.triggers.min_available_mb == preset.floor_mib
-        {
-            self.note = match self.draft.unstage(key) {
-                Ok(()) => {
-                    self.preset_staged = false;
-                    "File already matches the preset.".into()
-                }
-                Err(error) => error,
-            };
-            return;
-        }
-        match self.draft.stage(key, &preset.floor_mib.to_string()) {
+        self.choice_index = (if system_first {
+            self.choices
+                .iter()
+                .position(|choice| choice.system)
+                .or_else(exact)
+        } else {
+            exact()
+        })
+        .or_else(|| {
+            let current: f64 = current.parse().ok()?;
+            self.choices
+                .iter()
+                .enumerate()
+                .filter_map(|(i, choice)| {
+                    Some((i, (choice.raw.parse::<f64>().ok()? - current).abs()))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        })
+        .unwrap_or(0);
+        self.mode = Mode::Presets;
+        self.note.clear();
+    }
+
+    fn stage_selected(&mut self, raw: &str, source: EditSource) {
+        let key = FIELDS[self.selected].0;
+        match self.draft.stage(key, raw) {
             Ok(()) => {
-                self.preset_staged = true;
-                self.note = "System preset staged. No file written.".into();
+                let unchanged = self.draft.original.setting_explicit(key)
+                    && values(&self.draft.original)[self.selected]
+                        == values(&self.draft.proposed)[self.selected];
+                if unchanged {
+                    if let Err(error) = self.draft.unstage(key) {
+                        self.note = error;
+                        return;
+                    }
+                }
+                self.staged_source[self.selected] = (!unchanged).then_some(source);
+                self.mode = Mode::Browse;
+                self.note = if unchanged {
+                    "Matches the file. No change staged for this field."
+                } else {
+                    "Staged only. No file written."
+                }
+                .into();
             }
             Err(error) => self.note = error,
         }
@@ -239,12 +328,7 @@ impl Editor {
                     };
                     self.selected = GRID_ORDER[next];
                 }
-                b'\r' | b'\n' => {
-                    self.mode = Mode::Value;
-                    self.buffer.clear();
-                    self.note.clear();
-                }
-                b'p' => self.stage_preset(),
+                b'\r' | b'\n' => self.open_presets(),
                 b'w' if !self.changes().is_empty() => {
                     self.mode = Mode::Confirm;
                     self.review_page = 0;
@@ -256,36 +340,39 @@ impl Editor {
                 b'q' => return Outcome::Quit,
                 _ => return Outcome::Ignore,
             },
-            Mode::Value => match key {
+            Mode::Presets => match key {
+                b'j' => self.choice_index = (self.choice_index + 1).min(self.choices.len() - 1),
+                b'k' => self.choice_index = self.choice_index.saturating_sub(1),
+                b'm' => {
+                    self.mode = Mode::Manual;
+                    self.buffer.clear();
+                    self.note.clear();
+                }
+                b'\r' | b'\n' => {
+                    let choice = &self.choices[self.choice_index];
+                    let (raw, system) = (choice.raw.clone(), choice.system);
+                    self.stage_selected(&raw, EditSource::Preset { system });
+                }
                 27 => {
                     self.mode = Mode::Browse;
                     self.note.clear();
                 }
+                b'q' => return Outcome::Quit,
+                _ => return Outcome::Ignore,
+            },
+            Mode::Manual => match key {
+                b'p' | 27 => {
+                    self.mode = Mode::Presets;
+                    self.note.clear();
+                }
+                b'q' => return Outcome::Quit,
                 8 | 127 => {
                     self.buffer.pop();
                 }
-                b'\r' | b'\n' => match self.draft.stage(FIELDS[self.selected].0, &self.buffer) {
-                    Ok(()) => {
-                        if self
-                            .draft
-                            .original
-                            .setting_explicit(FIELDS[self.selected].0)
-                            && values(&self.draft.original)[self.selected]
-                                == values(&self.draft.proposed)[self.selected]
-                        {
-                            if let Err(error) = self.draft.unstage(FIELDS[self.selected].0) {
-                                self.note = error;
-                                return Outcome::Continue;
-                            }
-                        }
-                        if self.selected == FLOOR {
-                            self.preset_staged = false;
-                        }
-                        self.mode = Mode::Browse;
-                        self.note = "Staged only. No file written.".into();
-                    }
-                    Err(e) => self.note = e,
-                },
+                b'\r' | b'\n' => {
+                    let value = self.buffer.clone();
+                    self.stage_selected(&value, EditSource::Manual);
+                }
                 b' '..=b'~' if self.buffer.len() < 48 => self.buffer.push(key as char),
                 _ => return Outcome::Ignore,
             },
@@ -314,7 +401,11 @@ impl Editor {
     }
 
     pub(crate) fn editing_value(&self) -> Option<&str> {
-        (self.mode == Mode::Value).then_some(self.buffer.as_str())
+        (self.mode == Mode::Manual).then_some(self.buffer.as_str())
+    }
+
+    pub(crate) fn choices(&self) -> Option<(&[Choice], usize)> {
+        (self.mode == Mode::Presets).then_some((&self.choices, self.choice_index))
     }
 
     pub(crate) fn review(&self) -> (Vec<Vec<String>>, Vec<String>) {
@@ -322,16 +413,7 @@ impl Editor {
         let after = values(&self.draft.proposed);
         let mut rows = Vec::new();
         let hints = match self.mode {
-            Mode::Value => {
-                rows.push(vec![
-                    FIELDS[self.selected].0.into(),
-                    before[self.selected].clone(),
-                    self.buffer.clone(),
-                    FIELDS[self.selected].1.into(),
-                ]);
-                vec!["Type the proposed value. Enter stages; Esc cancels this input.".into()]
-            }
-            Mode::Browse => unreachable!("browse has its own compact grid"),
+            Mode::Browse | Mode::Presets | Mode::Manual => unreachable!("not in review"),
             Mode::Confirm => {
                 let changed = self.changes();
                 let i = changed[self.review_page];
@@ -346,10 +428,10 @@ impl Editor {
                 } else {
                     "built-in fallback"
                 };
-                let proposal = if i == FLOOR && self.preset_staged {
-                    "system preset"
-                } else {
-                    "manual"
+                let proposal = match self.staged_source[i] {
+                    Some(EditSource::Preset { system: true }) => "system preset",
+                    Some(EditSource::Preset { system: false }) => "preset",
+                    _ => "manual",
                 };
                 let mut hints = vec![
                     format!(
@@ -475,6 +557,95 @@ mod tests {
         );
     }
 
+    fn pick(editor: &mut Editor, raw: &str) {
+        editor.input(b'\r');
+        while editor.choice_index > 0 {
+            editor.input(b'k');
+        }
+        let target = editor
+            .choices
+            .iter()
+            .position(|choice| choice.raw == raw)
+            .unwrap();
+        for _ in 0..target {
+            editor.input(b'j');
+        }
+        editor.input(b'\r');
+    }
+
+    #[test]
+    fn watch_menu_values_are_field_valid_ordered_and_finite() {
+        let fixture = Fixture::write();
+        let dest = fixture.0.join("settings.toml");
+        fs::write(&dest, "# preset test\n").unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o640)).unwrap();
+        let machine = SystemPreset::from_ram_mib(8192);
+        let mut draft = WatchConfigDraft::open(Some(&dest)).unwrap();
+        for (i, (key, unit)) in FIELDS.iter().enumerate() {
+            let choices = field_choices(i, machine);
+            if *unit == "true/false" {
+                assert_eq!(
+                    choices
+                        .iter()
+                        .map(|choice| choice.raw.as_str())
+                        .collect::<Vec<_>>(),
+                    ["false", "true"]
+                );
+            } else {
+                assert!(choices
+                    .windows(2)
+                    .all(|pair| pair[0].raw.parse::<f64>().unwrap()
+                        < pair[1].raw.parse::<f64>().unwrap()));
+            }
+            for choice in choices {
+                draft
+                    .stage(key, &choice.raw)
+                    .unwrap_or_else(|e| panic!("{key}={} {e}", choice.raw));
+                draft.unstage(key).unwrap();
+            }
+        }
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "# preset test\n");
+        assert_eq!(
+            field_choices(FLOOR, machine)
+                .iter()
+                .filter(|choice| choice.system)
+                .count(),
+            1
+        );
+        assert!(!field_choices(FLOOR, None)
+            .iter()
+            .any(|choice| choice.system));
+    }
+
+    #[test]
+    fn watch_editor_requires_an_explicit_switch_before_manual_entry() {
+        let fixture = Fixture::write();
+        let dest = fixture.0.join("settings.toml");
+        let baseline = "[triggers]\nram_used_percent = 87.0\n";
+        fs::write(&dest, baseline).unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o640)).unwrap();
+        let cfg = crate::config::load_watch_config(Some(&dest)).unwrap();
+        let mut editor = Editor::open(&cfg, None).unwrap();
+        editor.input(b'\r');
+        assert_eq!(editor.choices().unwrap().0[editor.choice_index].raw, "85");
+        for key in b"83.5w" {
+            assert!(matches!(editor.input(*key), Outcome::Ignore));
+        }
+        assert!(editor.changes().is_empty());
+        editor.input(b'j');
+        editor.input(b'\r');
+        assert_eq!(editor.draft.proposed.triggers.ram_used_percent, 90.0);
+        assert_eq!(source(&cfg, 0, Some(&editor)), 'P');
+        editor.input(b'\r');
+        editor.input(b'm');
+        for key in b"83.5\r" {
+            editor.input(*key);
+        }
+        assert_eq!(editor.draft.proposed.triggers.ram_used_percent, 83.5);
+        assert_eq!(source(&cfg, 0, Some(&editor)), 'M');
+        assert_eq!(fs::read_to_string(&dest).unwrap(), baseline);
+    }
+
     #[test]
     fn watch_preset_respects_explicit_source_until_deliberate_review_and_save() {
         let fixture = Fixture::write();
@@ -497,7 +668,10 @@ mod tests {
         editor.input(b'p');
         assert!(editor.changes().is_empty());
         editor.input(b'j');
-        editor.input(b'p');
+        editor.input(b'\r');
+        assert!(editor.choices().unwrap().0[editor.choice_index].system);
+        assert!(editor.changes().is_empty());
+        editor.input(b'\r');
         assert_eq!(source(&original, FLOOR, Some(&editor)), 'P');
         assert_eq!(editor.draft.proposed.triggers.min_available_mb, 384);
         editor.input(b'w');
@@ -519,11 +693,12 @@ mod tests {
         assert_eq!(editor.draft.proposed.triggers.min_available_mb, 384);
         editor.input(b'j');
         editor.input(b'\r');
+        editor.input(b'm');
         for b in b"256\r" {
             editor.input(*b);
         }
         assert_eq!(source(&saved, FLOOR, Some(&editor)), 'M');
-        editor.input(b'p');
+        pick(&mut editor, "384");
         // Explicitly choosing the exact existing source clears the manual draft.
         assert!(editor.changes().is_empty());
         fs::write(
@@ -534,7 +709,7 @@ mod tests {
         let mut editor = make_editor();
         assert_eq!(editor.draft.proposed.triggers.min_available_mb, 0);
         editor.input(b'j');
-        editor.input(b'p');
+        pick(&mut editor, "384");
         editor.input(b'w');
         assert!(editor
             .review()
@@ -573,12 +748,14 @@ mod tests {
         };
         let mut first = launch();
         assert!(matches!(first.input(b'\r'), Outcome::Continue));
+        first.input(b'm');
         for ch in b"999" {
             first.input(*ch);
         }
         first.input(b'\r');
         assert!(first.note.contains("between 0 and 100"));
         assert_eq!(first.draft.proposed.triggers.ram_used_percent, 87.0);
+        first.input(27);
         first.input(27);
         first.draft.stage("ram-percent", "85").unwrap();
         assert!(matches!(first.input(27), Outcome::Cancel));

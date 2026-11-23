@@ -171,9 +171,12 @@ determined, no preset is suggested.
 `F` marks values supplied by the file and `B` marks built-in fallbacks.
 Explicit file values remain in effect for this Watch; a preview never replaces
 them. To edit an existing configuration you own, press `e` and select a row
-with `j`/`k`. Press Enter to enter a specific value (`M`), or select
-**Available floor** and press `p` to deliberately choose the system preset
-(`P`). Both choices stage a draft only. Use `w` to review the exact file, the
+with `j`/`k`. Enter opens **Presets** by default: choose a common value or
+**Off/On** with `j`/`k` and press Enter to stage it (`P`). **Available floor**
+also lists the system recommendation. For an exact value, press `m` to switch
+to **Manual**, type the value, and press Enter to stage it (`M`). Esc or `p`
+returns from Manual to Presets without staging that input. Neither choice
+writes anything until review and save. Use `w` to review the exact file, the
 original/proposed values, and their sources. Visit each change with `j`, then
 press Enter to save the batch. After saving, the file holds an explicit value;
 the tool does not recalculate saved values as hardware changes. Without an
