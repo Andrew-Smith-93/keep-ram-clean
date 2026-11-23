@@ -1121,7 +1121,10 @@ impl<'a> Layout<'a> {
             width,
         );
         rows.extend(self.text(&format!("Source: {source}"), width));
-        rows.extend(self.settings_grid(cfg, editor, width, interactive.then_some(page.selection)));
+        let grid = self.settings_grid(cfg, editor, width, interactive.then_some(page.selection));
+        let rule_width = grid.iter().map(|row| self.width(row)).max().unwrap_or(0);
+        rows.extend(grid);
+        let rule_at = rows.len();
         rows.extend(self.settings_note(
             width,
             "Values",
@@ -1216,6 +1219,14 @@ impl<'a> Layout<'a> {
                 None
             }
         };
+        // A cosmetic divider must not send an otherwise visible warning or
+        // key legend onto a new page at the exact screen-height boundary.
+        if rule_width > 0 && rows.len() != height.saturating_sub(1) {
+            rows.insert(
+                rule_at,
+                format!("{}{}{}", p.dim, "─".repeat(rule_width), p.nc),
+            );
+        }
         self.settings_page(rows, width, height, page, focus)
     }
 
@@ -1506,6 +1517,32 @@ mod tests {
             .settings(&cfg, (80, 0), false, None, "", &mut SettingsPage::default())
             .join("")
             .contains("[q]"));
+    }
+
+    #[test]
+    fn watch_settings_rule_separates_values_without_hiding_a_notice() {
+        let cfg = crate::Config::default();
+        for color in [false, true] {
+            let p = palette(color);
+            let layout = Layout::new(&p);
+            let mut page = SettingsPage::default();
+            page.preset.set(None).ok().unwrap();
+            let rows = layout.settings(&cfg, (80, 24), true, None, "", &mut page);
+            let values = rows
+                .iter()
+                .position(|row| row.contains("Built-in default"))
+                .unwrap();
+            let rule = visible(&layout, &rows[values - 1]);
+            assert!(rule.chars().all(|c| c == '─') && layout.width(&rule) >= 65);
+            assert_eq!(rows.len(), 22);
+            assert!(rows.last().unwrap().contains("[q]"));
+            let notice = "Cannot edit: Settings can save only a regular, singly linked file you own that is not writable by group or others.";
+            let rows = layout.settings(&cfg, (80, 24), true, None, notice, &mut page);
+            assert!(rows
+                .iter()
+                .any(|row| row.contains("not writable by group or others")));
+            assert!(rows.last().unwrap().contains("[q]"));
+        }
     }
 
     #[test]
