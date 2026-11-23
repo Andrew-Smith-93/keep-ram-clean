@@ -5,6 +5,7 @@ mod config;
 mod daemon;
 mod doctor;
 mod metrics;
+mod pressure_relief;
 mod triggers;
 mod ui;
 
@@ -100,6 +101,18 @@ enum Commands {
         /// Log what the daemon would do without modifying anything
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Watch explicit user workloads for severe memory pressure; reports by default
+    PressureWatch {
+        /// Exact PID of an already-running workload; repeat for multiple PIDs
+        #[arg(long, required = true)]
+        workload_pid: Vec<u32>,
+        /// Exact canonical path to a user-owned executable; repeat as needed
+        #[arg(long, required = true)]
+        allow_exe: Vec<PathBuf>,
+        /// Explicitly allow one SIGTERM per registered workload; never escalates
+        #[arg(long)]
+        terminate: bool,
     },
     /// Show live RAM, PSI, swap, tmpfs, auto-clean activity, and daemon status
     Status {
@@ -974,6 +987,23 @@ fn main() -> ExitCode {
                 1
             }
         },
+        Commands::PressureWatch {
+            workload_pid,
+            allow_exe,
+            terminate,
+        } => {
+            if cli.config.is_some() {
+                eprintln!("Error: pressure-watch is standalone and does not accept --config.");
+                return ExitCode::FAILURE;
+            }
+            match pressure_relief::watch(&workload_pid, &allow_exe, terminate) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
         Commands::Status {
             json,
             top,

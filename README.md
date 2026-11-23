@@ -28,6 +28,42 @@ A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linu
 
 ---
 
+## Opt-in memory-pressure relief
+
+`pressure-watch` is separate from ordinary cleanup and is **report-only by default**.
+It does not run through the existing system or user services, the cleanup command, or
+TOML configuration. It borrows the idea of checking available RAM, available swap,
+and kernel OOM scores from [earlyoom](https://github.com/rfjakob/earlyoom), but it
+does not scan for arbitrary victims, act system-wide, or send SIGKILL.
+
+Run in a terminal as the same regular, unprivileged user who owns the workload.
+Substitute a known workload PID and the canonical path to its user-owned binary:
+
+```sh
+keep-ram-clean pressure-watch --workload-pid 12345 --allow-exe "$HOME/bin/my-worker"
+```
+
+Repeat the PID and executable options to register several workloads (up to 16);
+nothing else can become a target. Use only dedicated workers whose interruption
+you can tolerate. System/package-owned executables, symlinks, wildcard paths,
+privileged processes and the watcher's own process and ancestors are rejected.
+After previewing the logs, add `--terminate` in a new foreground invocation only
+if stopping those explicit workloads is acceptable. Ctrl-C stops monitoring.
+Registration is bound to a Linux pidfd for each already-running process; a restart
+or recycled PID does not register a new workload. Missing or unreadable evidence
+blocks action. SIGTERM can interrupt work or lose unsaved state, is not a promise
+that the process exits, and is never escalated.
+
+Every two seconds the watcher samples `/proc/meminfo`. With swap, at most 10%
+available RAM and at most 10% free swap must persist for 20 seconds; without swap
+the available RAM limit is 5%. Invalid telemetry resets the timer. It ranks only
+registered workloads with at least 64 MiB resident memory by OOM score and then
+RSS, and excludes negative OOM adjustments. It reports or attempts at most one
+action per 60 seconds in a watch session, and attempts an individual SIGTERM
+only once per registered process. These are host memory figures, not cgroup
+quotas. Standard pidfd and procfs access are required; there is no numeric PID
+signal fallback. No configuration or existing service behavior changes.
+
 ## Build & Installation
 
 ### Debian packages
