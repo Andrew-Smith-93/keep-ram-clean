@@ -106,7 +106,39 @@ fn regular_user(status: &str, uid: u32) -> Option<()> {
     Some(())
 }
 
-fn sample(procfs: &Path, pid: u32, uid: u32, allowed: &[PathBuf]) -> Option<Sample> {
+struct AllowedExe {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl AllowedExe {
+    fn open(path: &Path, uid: u32) -> Option<Self> {
+        if fs::canonicalize(path).ok()?.as_path() != path {
+            return None;
+        }
+        let file = fs::File::open(path).ok()?;
+        let pinned = file.metadata().ok()?;
+        let current = fs::symlink_metadata(path).ok()?;
+        (valid_exe(&pinned, uid) && same_file(&pinned, &current)).then_some(Self {
+            path: path.to_path_buf(),
+            file,
+        })
+    }
+
+    fn matches(&self, meta: &fs::Metadata, uid: u32) -> bool {
+        self.file.metadata().is_ok_and(|pinned| {
+            same_file(&pinned, meta)
+                && fs::symlink_metadata(&self.path)
+                    .is_ok_and(|current| valid_exe(&current, uid) && same_file(&pinned, &current))
+        })
+    }
+}
+
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+fn sample(procfs: &Path, pid: u32, uid: u32, allowed: &[AllowedExe]) -> Option<Sample> {
     if pid < 2 {
         return None;
     }
@@ -129,11 +161,9 @@ fn sample(procfs: &Path, pid: u32, uid: u32, allowed: &[PathBuf]) -> Option<Samp
         return None;
     }
     let exe = fs::read_link(dir.join("exe")).ok()?;
-    if !allowed.contains(&exe) {
-        return None;
-    }
+    let allow = allowed.iter().find(|a| a.path == exe)?;
     let meta = fs::metadata(dir.join("exe")).ok()?;
-    if !valid_exe(&meta, uid) {
+    if !valid_exe(&meta, uid) || !allow.matches(&meta, uid) {
         return None;
     }
     let score = fs::read_to_string(dir.join("oom_score"))
@@ -198,7 +228,18 @@ fn fd_matches(procfs: &Path, fd: &OwnedFd, pid: u32) -> bool {
         == Some(pid)
 }
 
-fn register(procfs: &Path, pid: u32, uid: u32, allowed: &[PathBuf]) -> Option<Workload> {
+// Only discard a previously attempted identity when the fd itself confirms exit.
+fn pidfd_retired(fd: &OwnedFd) -> bool {
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    (unsafe { libc::poll(&mut poll, 1, 0) }) == 1
+        && poll.revents & (libc::POLLIN | libc::POLLHUP) != 0
+}
+
+fn register(procfs: &Path, pid: u32, uid: u32, allowed: &[AllowedExe]) -> Option<Workload> {
     let proc_dir = fs::File::open(procfs.join(pid.to_string())).ok()?;
     let before = sample(procfs, pid, uid, allowed)?.identity;
     if before.proc_ino != proc_dir.metadata().ok()?.ino() {
@@ -216,6 +257,30 @@ fn register(procfs: &Path, pid: u32, uid: u32, allowed: &[PathBuf]) -> Option<Wo
 
 fn rank(sample: &Sample, pid: u32) -> (u32, u64, std::cmp::Reverse<u32>) {
     (sample.score, sample.rss, std::cmp::Reverse(pid))
+}
+
+fn discover_best(
+    procfs: &Path,
+    uid: u32,
+    allowed: &[AllowedExe],
+    excluded: &HashSet<u32>,
+) -> io::Result<Option<(u32, Sample)>> {
+    Ok(fs::read_dir(procfs)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            if excluded.contains(&pid) || entry.metadata().ok()?.uid() != uid {
+                return None;
+            }
+            // Avoid full status reads for processes whose executable is not allowlisted.
+            let path = fs::read_link(entry.path().join("exe")).ok()?;
+            if !allowed.iter().any(|a| a.path == path) {
+                return None;
+            }
+            let s = sample(procfs, pid, uid, allowed)?;
+            (s.rss >= MIN_RSS_KIB).then_some((pid, s))
+        })
+        .max_by_key(|(pid, s)| rank(s, *pid)))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -241,9 +306,11 @@ fn act(
     Ok(Action::TermSent)
 }
 
-fn validate_args(pids: &[u32], paths: &[PathBuf]) -> Result<(), &'static str> {
-    if pids.is_empty()
-        || pids.len() > MAX_WORKLOADS
+fn validate_args(pids: &[u32], paths: &[PathBuf], discover: bool) -> Result<(), &'static str> {
+    if discover != pids.is_empty() {
+        return Err("choose --discover or explicit workload PIDs, not both");
+    }
+    if pids.len() > MAX_WORKLOADS
         || pids.iter().any(|&pid| pid < 2 || pid > i32::MAX as u32)
         || pids.iter().collect::<HashSet<_>>().len() != pids.len()
     {
@@ -265,8 +332,13 @@ fn validate_args(pids: &[u32], paths: &[PathBuf]) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn watch(pids: &[u32], paths: &[PathBuf], terminate: bool) -> Result<(), String> {
-    validate_args(pids, paths).map_err(str::to_owned)?;
+pub fn watch(
+    pids: &[u32],
+    paths: &[PathBuf],
+    discover: bool,
+    terminate: bool,
+) -> Result<(), String> {
+    validate_args(pids, paths, discover).map_err(str::to_owned)?;
     let procfs = Path::new("/proc");
     let uid = unsafe { libc::getuid() };
     let self_pid = std::process::id();
@@ -276,14 +348,15 @@ pub fn watch(pids: &[u32], paths: &[PathBuf], terminate: bool) -> Result<(), Str
     {
         return Err("run as a regular non-root user (UID >= 1000) without added privileges".into());
     }
-    for path in paths {
-        if fs::canonicalize(path).as_ref().ok() != Some(path)
-            || !fs::metadata(path).is_ok_and(|m| valid_exe(&m, uid))
-        {
-            return Err(format!(
-                "not an exact, canonical, user-owned executable: {path:?}"
-            ));
-        }
+    let allowed: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            AllowedExe::open(path, uid)
+                .ok_or_else(|| format!("not an exact, canonical, user-owned executable: {path:?}"))
+        })
+        .collect::<Result<_, _>>()?;
+    if discover && !pidfd_open(self_pid as i32).is_ok_and(|fd| fd_matches(procfs, &fd, self_pid)) {
+        return Err("unable to confirm pidfd support and PID namespace; discovery disabled".into());
     }
     let protected = ancestors(procfs, self_pid).ok_or("unable to verify parent process chain")?;
     let mut workloads = Vec::new();
@@ -291,21 +364,29 @@ pub fn watch(pids: &[u32], paths: &[PathBuf], terminate: bool) -> Result<(), Str
         if protected.contains(&pid) {
             return Err(format!("PID {pid} is self or an ancestor"));
         }
-        workloads.push(register(procfs, pid, uid, paths).ok_or_else(|| {
+        workloads.push(register(procfs, pid, uid, &allowed).ok_or_else(|| {
             format!("cannot safely register PID {pid}; check ownership, executable, OOM protection and pidfd support")
         })?);
     }
     eprintln!(
-        "[pressure] {}; watching {} registered workload(s); Ctrl-C stops.",
+        "[pressure] {}; {}; Ctrl-C stops.",
         if terminate {
             "SIGTERM explicitly enabled"
         } else {
             "report only (no signals)"
         },
-        workloads.len()
+        if discover {
+            format!(
+                "discovering only {} allowlisted executable(s)",
+                allowed.len()
+            )
+        } else {
+            format!("watching {} registered workload(s)", workloads.len())
+        }
     );
     let clock = Instant::now();
     let mut gate = PressureGate::default();
+    let mut last_scan = None;
     loop {
         let now = clock.elapsed();
         let memory = || {
@@ -314,30 +395,52 @@ pub fn watch(pids: &[u32], paths: &[PathBuf], terminate: bool) -> Result<(), Str
                 .and_then(|s| pressured(&s))
         };
         if gate.ready(now, memory()) {
-            let protected =
+            let mut protected =
                 ancestors(procfs, self_pid).ok_or("unable to verify parent process chain")?;
+            if discover {
+                // Retain live attempted identities so a surviving worker cannot be
+                // signalled again. Drop previews and retired pidfds before rescanning.
+                workloads.retain(|w| w.attempted && !pidfd_retired(&w.fd));
+                protected.extend(workloads.iter().map(|w| w.pid));
+                if workloads.len() >= 128 {
+                    return Err("too many live attempted workloads; stopping discovery".into());
+                }
+                if last_scan.is_none_or(|prev| now.saturating_sub(prev) >= Duration::from_secs(10))
+                {
+                    last_scan = Some(now);
+                    if let Some((pid, observed)) = discover_best(procfs, uid, &allowed, &protected)
+                        .map_err(|e| format!("unable to scan procfs safely: {e}"))?
+                    {
+                        if let Some(w) = register(procfs, pid, uid, &allowed)
+                            .filter(|w| w.identity == observed.identity)
+                        {
+                            workloads.push(w);
+                        }
+                    }
+                }
+            }
             let candidate = workloads
                 .iter_mut()
                 .filter(|w| {
                     !w.attempted && !protected.contains(&w.pid) && fd_matches(procfs, &w.fd, w.pid)
                 })
                 .filter_map(|w| {
-                    let s = sample(procfs, w.pid, uid, paths)?;
+                    let s = sample(procfs, w.pid, uid, &allowed)?;
                     (s.identity == w.identity && s.rss >= MIN_RSS_KIB).then_some((w, s))
                 })
                 .max_by_key(|(w, s)| rank(s, w.pid));
             if let Some((w, s)) = candidate {
-                gate.attempted = Some(now);
-                let current = sample(procfs, w.pid, uid, paths);
+                gate.attempted = Some(clock.elapsed());
                 let ready = memory() == Some(true)
                     && ancestors(procfs, self_pid).is_some_and(|chain| !chain.contains(&w.pid))
-                    && fd_matches(procfs, &w.fd, w.pid)
-                    && current.as_ref().is_some_and(|a| a.rss >= MIN_RSS_KIB);
+                    && fd_matches(procfs, &w.fd, w.pid);
+                let current =
+                    sample(procfs, w.pid, uid, &allowed).filter(|a| ready && a.rss >= MIN_RSS_KIB);
                 let signal = || pidfd_send_signal(w.fd.as_raw_fd(), libc::SIGTERM);
                 if terminate {
                     w.attempted = true;
                 }
-                match act(&w.identity, current.as_ref().filter(|_| ready).map(|s| &s.identity), terminate, signal) {
+                match act(&w.identity, current.as_ref().map(|s| &s.identity), terminate, signal) {
                     Ok(Action::Preview) => eprintln!("[pressure] would SIGTERM PID {} ({:?}, RSS {} MiB, OOM score {}); no signal sent", w.pid, s.identity.exe, s.rss / 1024, s.score),
                     Ok(Action::TermSent) => eprintln!("[pressure] sent SIGTERM to PID {} ({:?}, RSS {} MiB, OOM score {})", w.pid, s.identity.exe, s.rss / 1024, s.score),
                     Ok(Action::Refused) => eprintln!("[pressure] PID {} no longer qualifies; no signal sent", w.pid),
@@ -345,9 +448,10 @@ pub fn watch(pids: &[u32], paths: &[PathBuf], terminate: bool) -> Result<(), Str
                 }
             }
         }
-        if !workloads
-            .iter()
-            .any(|w| !w.attempted && fd_matches(procfs, &w.fd, w.pid))
+        if !discover
+            && !workloads
+                .iter()
+                .any(|w| !w.attempted && fd_matches(procfs, &w.fd, w.pid))
         {
             eprintln!(
                 "[pressure] no registered workload remains eligible for an attempt; stopping"
@@ -404,13 +508,16 @@ mod tests {
     #[test]
     fn unsafe_arguments_rejected() {
         let p = |x: &str| [PathBuf::from(x)];
-        assert!(validate_args(&[], &p("/home/workload")).is_err());
-        assert!(validate_args(&[0], &p("/home/workload")).is_err());
-        assert!(validate_args(&[1], &p("/home/workload")).is_err());
-        assert!(validate_args(&[8, 8], &p("/home/workload")).is_err());
-        assert!(validate_args(&[8], &p("app")).is_err());
-        assert!(validate_args(&[8], &p("/home/*")).is_err());
-        assert!(validate_args(&[8], &p("/home/workload")).is_ok());
+        assert!(validate_args(&[], &p("/home/workload"), false).is_err());
+        assert!(validate_args(&[0], &p("/home/workload"), false).is_err());
+        assert!(validate_args(&[1], &p("/home/workload"), false).is_err());
+        assert!(validate_args(&[8, 8], &p("/home/workload"), false).is_err());
+        assert!(validate_args(&[8], &p("app"), false).is_err());
+        assert!(validate_args(&[8], &p("/home/*"), false).is_err());
+        assert!(validate_args(&[8], &p("/home/workload"), false).is_ok());
+        assert!(validate_args(&[], &p("/home/workload"), true).is_ok());
+        assert!(validate_args(&[8], &p("/home/workload"), true).is_err());
+        assert!(validate_args(&[], &[], true).is_err());
     }
 
     fn status(pid: u32, uid: u32, parent: u32) -> String {
@@ -432,6 +539,63 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn synthetic_discovery_uses_exact_file_and_uid_then_ranks_eligible() {
+        let uid = unsafe { libc::getuid() };
+        if uid < 1000 {
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("krc-discovery-fixture-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let fixture = Fixture(root);
+        let root = &fixture.0;
+        let allowed_path = root.join("allowed");
+        let other_path = root.join("other");
+        for path in [&allowed_path, &other_path] {
+            fs::write(path, "fixture only").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let add = |pid, proc_uid, score, path: &Path| {
+            let dir = root.join(format!("{pid}"));
+            fs::create_dir(&dir).unwrap();
+            symlink(path, dir.join("exe")).unwrap();
+            fs::write(
+                dir.join("stat"),
+                format!("{pid} (allowed) S 1 {}50\n", "0 ".repeat(17)),
+            )
+            .unwrap();
+            fs::write(dir.join("status"), status(pid, proc_uid, 1)).unwrap();
+            fs::write(dir.join("oom_score"), format!("{score}\n")).unwrap();
+            fs::write(dir.join("oom_score_adj"), "0\n").unwrap();
+        };
+        add(1001, uid, 50, &allowed_path);
+        add(1002, uid, 55, &allowed_path);
+        add(1003, uid, 100, &other_path); // A matching comm name alone is not enough.
+        add(1004, uid + 1, 110, &allowed_path);
+        let allow = [AllowedExe::open(&allowed_path, uid).unwrap()];
+        let get = |skip: &HashSet<u32>| discover_best(root, uid, &allow, skip).unwrap();
+        let (pid, observed) = get(&HashSet::new()).unwrap();
+        assert_eq!(pid, 1002);
+        assert_eq!(get(&HashSet::from([1002])).unwrap().0, 1001);
+        // A pathname replaced with a new inode cannot enroll the replacement.
+        fs::rename(&allowed_path, root.join("renamed")).unwrap();
+        fs::write(&allowed_path, "replacement").unwrap();
+        fs::set_permissions(&allowed_path, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(get(&HashSet::new()).is_none());
+        let current = sample(root, pid, uid, &allow);
+        assert_eq!(
+            act(
+                &observed.identity,
+                current.as_ref().map(|s| &s.identity),
+                true,
+                || panic!("no signal should be attempted")
+            )
+            .unwrap(),
+            Action::Refused
+        );
     }
 
     #[test]
@@ -462,7 +626,7 @@ mod tests {
         fs::write(dir.join("status"), status(49003, uid, 1)).unwrap();
         fs::write(dir.join("oom_score"), "999\n").unwrap();
         fs::write(dir.join("oom_score_adj"), "0\n").unwrap();
-        let allow = [exe];
+        let allow = [AllowedExe::open(&exe, uid).unwrap()];
         let initial = sample(procfs, 49003, uid, &allow).unwrap();
         assert_eq!(initial.identity.start, 50);
         assert_eq!(rank(&initial, 49003).0, 999);

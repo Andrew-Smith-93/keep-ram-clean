@@ -105,8 +105,11 @@ enum Commands {
     /// Watch explicit user workloads for severe memory pressure; reports by default
     PressureWatch {
         /// Exact PID of an already-running workload; repeat for multiple PIDs
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "discover")]
         workload_pid: Vec<u32>,
+        /// Discover only exact allowlisted user-owned executables when pressure persists
+        #[arg(long, conflicts_with = "workload_pid")]
+        discover: bool,
         /// Exact canonical path to a user-owned executable; repeat as needed
         #[arg(long, required = true)]
         allow_exe: Vec<PathBuf>,
@@ -989,6 +992,7 @@ fn main() -> ExitCode {
         },
         Commands::PressureWatch {
             workload_pid,
+            discover,
             allow_exe,
             terminate,
         } => {
@@ -996,7 +1000,7 @@ fn main() -> ExitCode {
                 eprintln!("Error: pressure-watch is standalone and does not accept --config.");
                 return ExitCode::FAILURE;
             }
-            match pressure_relief::watch(&workload_pid, &allow_exe, terminate) {
+            match pressure_relief::watch(&workload_pid, &allow_exe, discover, terminate) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("Error: {e}");

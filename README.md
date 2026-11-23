@@ -34,23 +34,30 @@ A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linu
 It does not run through the existing system or user services, the cleanup command, or
 TOML configuration. It borrows the idea of checking available RAM, available swap,
 and kernel OOM scores from [earlyoom](https://github.com/rfjakob/earlyoom), but it
-does not scan for arbitrary victims, act system-wide, or send SIGKILL.
+does not select arbitrary victims, act system-wide, or send SIGKILL.
 
-Run in a terminal as the same regular, unprivileged user who owns the workload.
-Substitute a known workload PID and the canonical path to its user-owned binary:
+Run in a terminal as the same regular, unprivileged user who owns the workloads.
+To discover matching processes automatically, pass the exact canonical path to a
+dedicated, user-owned binary. Repeat `--allow-exe` to allow up to 16 executables.
 
 ```sh
-keep-ram-clean pressure-watch --workload-pid 12345 --allow-exe "$HOME/bin/my-worker"
+keep-ram-clean pressure-watch --discover --allow-exe "$HOME/bin/my-worker"
 ```
 
-Repeat the PID and executable options to register several workloads (up to 16);
-nothing else can become a target. Use only dedicated workers whose interruption
-you can tolerate. System/package-owned executables, symlinks, wildcard paths,
+Discovery checks running processes only when pressure is sustained. It considers
+only processes executing an allowlisted file, and pins that file at watcher startup.
+If the binary is replaced, restart the watcher to allow the replacement. To restrict
+the scope to already-known processes instead, omit `--discover` and repeat
+`--workload-pid PID` up to 16 times alongside the executable allowlist.
+Use only dedicated workers whose interruption you can tolerate.
+System/package-owned executables, symlinks, wildcard paths,
 privileged processes and the watcher's own process and ancestors are rejected.
 After previewing the logs, add `--terminate` in a new foreground invocation only
 if stopping those explicit workloads is acceptable. Ctrl-C stops monitoring.
-Registration is bound to a Linux pidfd for each already-running process; a restart
-or recycled PID does not register a new workload. Missing or unreadable evidence
+Registration is bound to a Linux pidfd for each process. In explicit-PID mode,
+restarts are not re-enrolled. Discovery may consider a new instance if it matches
+the pinned allowlist, but it must be verified and bound afresh; an existing request
+never follows a recycled PID. Missing or unreadable evidence
 blocks action. SIGTERM can interrupt work or lose unsaved state, is not a promise
 that the process exits, and is never escalated.
 
