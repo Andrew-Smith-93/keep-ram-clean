@@ -26,11 +26,14 @@ impl Report<'_> {
             Some(_) => ("● DAEMON RUNNING", p.green),
             None => ("○ DAEMON STOPPED", p.yellow),
         };
-        let mut output = layout.banner(
-            &format!("keep-ram-clean v{}", crate::daemon::VERSION),
-            "",
-            badge,
-            color,
+        let mut output = layout.text(
+            &format!(
+                "{}keep-ram-clean v{}{}  │  {color}{badge}{}",
+                p.bold,
+                crate::daemon::VERSION,
+                p.nc,
+                p.nc
+            ),
             width,
         );
 
@@ -81,10 +84,18 @@ impl Report<'_> {
             ]);
         }
         let memory = [
-            vec!["Available".into(), fmt_mib(mem.available_mb)],
-            vec!["Cache".into(), fmt_mib(mem.cached_mb)],
-            vec!["Reclaimable slab".into(), fmt_mib(mem.slab_reclaimable_mb)],
-            vec!["Dirty".into(), fmt_mib(mem.dirty_mb)],
+            vec![
+                "Available / Cache".into(),
+                format!("{} / {}", fmt_mib(mem.available_mb), fmt_mib(mem.cached_mb)),
+            ],
+            vec![
+                "Reclaimable slab / Dirty".into(),
+                format!(
+                    "{} / {}",
+                    fmt_mib(mem.slab_reclaimable_mb),
+                    fmt_mib(mem.dirty_mb)
+                ),
+            ],
         ];
         let psi = &snap.psi;
         let mut pressure = Vec::new();
@@ -100,11 +111,11 @@ impl Report<'_> {
                 ),
             ]);
             pressure.push(vec![
-                "PSI some (10s / 60s)".into(),
+                "PSI some 10/60s".into(),
                 format!("{:.2}% / {:.2}%", psi.some_avg10, psi.some_avg60),
             ]);
             pressure.push(vec![
-                "PSI full (10s / 60s)".into(),
+                "PSI full 10/60s".into(),
                 format!("{:.2}% / {:.2}%", psi.full_avg10, psi.full_avg60),
             ]);
             pressure.push(vec![
@@ -139,46 +150,56 @@ impl Report<'_> {
             })
             .collect();
         let left = |w| {
-            let mut rows = layout.table(
+            layout.table(
                 "MEMORY · SWAP · TMPFS",
-                &["RESOURCE", "USED / TOTAL", "UTILIZATION"],
+                &["RESOURCE", "USED / TOTAL", "USAGE"],
                 &resources,
                 w,
-            );
-            rows.extend(layout.table("RAM DETAILS", &["METRIC", "AMOUNT"], &memory, w));
-            rows
+            )
         };
-        let right = |w| {
-            let mut rows = layout.table("PRESSURE & LOAD", &["METRIC", "READING"], &pressure, w);
+        let detail_table = |w| layout.table("RAM DETAILS", &["METRIC", "AMOUNTS"], &memory, w);
+        let pressure_table =
+            |w| layout.table("PRESSURE & LOAD", &["METRIC", "READING"], &pressure, w);
+        let consumer_table = |w| {
             if consumers.is_empty() {
-                rows.extend(layout.table(
+                layout.table(
                     "TOP CONSUMERS",
                     &["STATE", "VALUE"],
                     &[vec!["Listed".into(), "0 (disabled or unavailable)".into()]],
                     w,
-                ));
+                )
             } else {
-                rows.extend(layout.table(
+                layout.table(
                     &format!("TOP {} CONSUMERS", consumers.len()),
                     &["PID", "PROCESS", "RSS", "RAM SHARE"],
                     &consumers,
                     w,
-                ));
+                )
             }
-            rows
         };
         if width >= 120 {
-            let lw = (width - 1) / 2;
-            let rw = width - lw - 1;
-            let mut l = left(lw);
-            let mut r = right(rw);
-            let n = l.len().max(r.len());
-            l.resize(n, " ".repeat(lw));
-            r.resize(n, " ".repeat(rw));
-            output.extend(l.into_iter().zip(r).map(|(a, b)| format!("{a} {b}")));
+            output.extend(layout.pair(
+                width,
+                |w| {
+                    let mut rows = left(w);
+                    rows.extend(detail_table(w));
+                    rows
+                },
+                |w| {
+                    let mut rows = pressure_table(w);
+                    rows.extend(consumer_table(w));
+                    rows
+                },
+            ));
+        } else if width >= 80 {
+            output.extend(left(width));
+            output.extend(layout.pair(width, detail_table, pressure_table));
+            output.extend(consumer_table(width));
         } else {
             output.extend(left(width));
-            output.extend(right(width));
+            output.extend(detail_table(width));
+            output.extend(pressure_table(width));
+            output.extend(consumer_table(width));
         }
         output.extend(layout.swap_devices(&snap.swaps, width));
 
@@ -189,36 +210,33 @@ impl Report<'_> {
         } else {
             "Reactive".into()
         };
-        let triggers = [
+        let mut status = vec![
             vec![
-                "RAM used / Available".into(),
+                "RAM / Available / Swap".into(),
                 format!(
-                    "≥ {:.0}% / ≤ {}",
+                    "≥ {:.0}% / ≤ {} / ≥ {:.0}%",
                     t.ram_used_percent,
-                    fmt_mib(t.min_available_mb)
+                    fmt_mib(t.min_available_mb),
+                    t.swap_used_percent
                 ),
             ],
-            vec!["Swap used".into(), format!("≥ {:.0}%", t.swap_used_percent)],
             vec![
                 "PSI some / full".into(),
                 format!("≥ {:.0} / {:.0}%", t.psi_some_avg10, t.psi_full_avg10),
             ],
             vec![
-                "Cooldown / Mode".into(),
-                format!("{}s / {when}", t.cooldown_seconds),
-            ],
-            vec![
-                "Notifications".into(),
-                if self.config.notifications.enabled {
-                    "ON"
-                } else {
-                    "OFF"
-                }
-                .into(),
+                "Cooldown / Mode / Alerts".into(),
+                format!(
+                    "{}s / {when} / {}",
+                    t.cooldown_seconds,
+                    if self.config.notifications.enabled {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
+                ),
             ],
         ];
-        output.extend(layout.table("TRIGGERS", &["SETTING", "VALUE"], &triggers, width));
-        let mut status = Vec::new();
         if let Some(d) = active {
             if d.cleaning_now {
                 status.push(vec!["State".into(), "Auto-clean in progress".into()]);
@@ -246,7 +264,12 @@ impl Report<'_> {
                 "Daemon not running. Start the daemon or systemd service.".into(),
             ]);
         }
-        output.extend(layout.table("AUTO-CLEAN ACTIVITY", &["FIELD", "VALUE"], &status, width));
+        output.extend(layout.table(
+            "AUTO-CLEAN ACTIVITY & TRIGGERS",
+            &["FIELD", "VALUE"],
+            &status,
+            width,
+        ));
         if let Some(d) = active {
             let recent: Vec<_> = if d.recent_cleanups.is_empty() {
                 d.last_cleanup.iter().collect()
@@ -282,12 +305,9 @@ impl Report<'_> {
                             .join(" ");
                         vec![
                             format!(
-                                "{} ({:.2}s)",
+                                "{} {:.2}s | RAM {:+} / Swap {:+} MiB",
                                 crate::fmt_hms(e.finished_at),
-                                e.duration_seconds
-                            ),
-                            format!(
-                                "{:+} MiB RAM / {:+} MiB swap",
+                                e.duration_seconds,
                                 e.ram_freed_mb,
                                 -i128::from(e.swap_freed_mb)
                             ),
@@ -298,7 +318,7 @@ impl Report<'_> {
                     .collect::<Vec<_>>();
                 output.extend(layout.table(
                     "RECENT CLEANUPS",
-                    &["WHEN", "CHANGE", "REASON", "STEPS"],
+                    &["WHEN / CHANGE", "REASON", "STEPS"],
                     &rows,
                     width,
                 ));
@@ -307,7 +327,7 @@ impl Report<'_> {
         if let Some(msg) = self.toast {
             output.extend(layout.text(&escape_controls(msg), width));
         }
-        output.extend(layout.text(&format!("  [c] Clean now   [+/-] RAM trigger ({:.0}%)   [n] Alerts   [r] Reload   [q] Quit   [s] Settings   ({}s refresh)", t.ram_used_percent, self.interval), width));
+        output.extend(layout.text(&format!("[c] Clean now  [+/-] RAM ({:.0}%)  [n] Alerts  [r] Reload  [s] Settings  [q] Quit  {}s refresh", t.ram_used_percent, self.interval), width));
         output
     }
 }
@@ -463,9 +483,69 @@ mod tests {
             toast: None,
             interval: 2,
         };
+        let mut normal_snapshot = snapshot.clone();
+        normal_snapshot.tmpfs_mounts[0].mountpoint = "/run/user/1000".into();
+        let mut normal_processes = processes.clone();
+        normal_processes[0].comm = "build-worker".into();
+        let mut normal_daemon = d.clone();
+        normal_daemon.cleaning_now = false;
+        normal_daemon.cleaning_reason = None;
+        normal_daemon.recent_cleanups.truncate(1);
+        normal_daemon.recent_cleanups[0].reasons = vec!["RAM above threshold".into()];
+        let normal = Report {
+            config: &cfg,
+            snapshot: &normal_snapshot,
+            processes: &normal_processes,
+            daemon: Some(&normal_daemon),
+            toast: None,
+            interval: 2,
+        };
+        let colored = Palette {
+            color: true,
+            bold: "\x1b[1m",
+            dim: "\x1b[2m",
+            green: "\x1b[0;32m",
+            cyan: "\x1b[0;36m",
+            yellow: "\x1b[1;33m",
+            red: "\x1b[0;31m",
+            nc: "\x1b[0m",
+        };
+        for (width, previous_normal, previous_dense) in [(80, 60, 81), (120, 45, 63)] {
+            let normal_plain = normal.render(width, &p);
+            let dense_plain = report.render(width, &p);
+            println!(
+                "density-benchmark width={width} normal={} dense={}",
+                normal_plain.len(),
+                dense_plain.len()
+            );
+            assert!(normal_plain.len() < previous_normal);
+            assert!(dense_plain.len() < previous_dense);
+            for (fixture, plain) in [(&normal, normal_plain), (&report, dense_plain)] {
+                let ansi = fixture.render(width, &colored);
+                assert_eq!(ansi.len(), plain.len());
+                let sans_ansi = ansi
+                    .into_iter()
+                    .map(|line| {
+                        [
+                            colored.bold,
+                            colored.dim,
+                            colored.green,
+                            colored.cyan,
+                            colored.yellow,
+                            colored.red,
+                            colored.nc,
+                        ]
+                        .into_iter()
+                        .fold(line, |line, code| line.replace(code, ""))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(sans_ansi, plain);
+            }
+        }
         for width in [35, 80, 120] {
             let lines = report.render(width, &p);
             let text = lines.join("\n");
+            let wrapped = text.split_whitespace().collect::<Vec<_>>().join(" ");
             for item in [
                 "TMP-END",
                 "PROC-END",
@@ -483,7 +563,7 @@ mod tests {
                 "[s] Settings",
                 "[c] Clean now",
             ] {
-                assert!(text.contains(item), "{width} missing {item}: {text}");
+                assert!(wrapped.contains(item), "{width} missing {item}: {text}");
             }
             assert!(!text.contains('…') && !text.contains("WHY-3-END"));
         }

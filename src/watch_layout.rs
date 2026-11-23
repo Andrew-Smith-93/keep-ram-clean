@@ -342,6 +342,26 @@ impl<'a> Layout<'a> {
         )
     }
 
+    /// Lay out two independently wrapped tables without repeating padding.
+    pub(crate) fn pair(
+        &self,
+        width: usize,
+        left: impl FnOnce(usize) -> Vec<String>,
+        right: impl FnOnce(usize) -> Vec<String>,
+    ) -> Vec<String> {
+        let lw = (width - 1) / 2;
+        let rw = width - lw - 1;
+        let mut l = left(lw);
+        let mut r = right(rw);
+        let n = l.len().max(r.len());
+        l.resize(n, " ".repeat(lw));
+        r.resize(n, " ".repeat(rw));
+        l.into_iter()
+            .zip(r)
+            .map(|(a, b)| format!("{a} {b}"))
+            .collect()
+    }
+
     pub(crate) fn table(
         &self,
         title: &str,
@@ -350,11 +370,20 @@ impl<'a> Layout<'a> {
         width: usize,
     ) -> Vec<String> {
         let inner = width - 4;
-        let gaps = 3 * (headers.len() - 1);
+        let gaps = 2 * (headers.len() - 1);
         let mut lines = Vec::new();
-        if inner >= (gaps + headers.len() * 10).max(36) {
+        let mut sizes = headers
+            .iter()
+            .map(|&header| match header {
+                "USED / TOTAL" | "AMOUNTS" => 18, // fit two numbers with units
+                "USAGE" | "RAM SHARE" => 14,      // fit the mini gauge and percentage
+                "WHEN / CHANGE" => 27, // keep time/deltas together instead of starving this column
+                _ => 8,
+            })
+            .collect::<Vec<_>>();
+        let minimum = sizes.iter().sum::<usize>() + gaps;
+        if inner >= minimum.max(34) {
             let usable = inner - gaps;
-            let mut sizes = vec![8; headers.len()];
             let mut left = usable - sizes.iter().sum::<usize>();
             let wants: Vec<_> = headers
                 .iter()
@@ -367,6 +396,11 @@ impl<'a> Layout<'a> {
                         .max(self.width(h))
                 })
                 .collect();
+            if headers.len() == 2 {
+                let label = wants[0].min(usable / 2).max(sizes[0]).min(sizes[0] + left);
+                left -= label - sizes[0];
+                sizes[0] = label;
+            }
             while left != 0 {
                 let slot = (0..sizes.len())
                     .filter(|&i| sizes[i] < wants[i])
@@ -392,20 +426,16 @@ impl<'a> Layout<'a> {
                             .zip(&sizes)
                             .map(|(c, &n)| c.get(y).cloned().unwrap_or_else(|| " ".repeat(n)))
                             .collect::<Vec<_>>()
-                            .join(" │ ")
+                            .join("│ ")
                     })
                     .collect::<Vec<_>>()
             };
             lines.extend(wrapped(
-                &headers.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
-            ));
-            lines.push(
-                sizes
+                &headers
                     .iter()
-                    .map(|n| "─".repeat(*n))
-                    .collect::<Vec<_>>()
-                    .join("─┼─"),
-            );
+                    .map(|s| format!("{}{s}{}", self.p.bold, self.p.nc))
+                    .collect::<Vec<_>>(),
+            ));
             for row in rows {
                 lines.extend(wrapped(row));
             }
@@ -565,8 +595,14 @@ impl<'a> Layout<'a> {
             ],
             vec!["Logging".into(), escape_controls(&cfg.logging.level)],
         ];
-        rows.extend(self.table("WHEN TO ACT", &["SETTING", "VALUE"], &triggers, width));
-        rows.extend(self.table("WHAT TO DO", &["SETTING", "VALUE"], &actions, width));
+        let when = |w| self.table("WHEN TO ACT", &["SETTING", "VALUE"], &triggers, w);
+        let actions = |w| self.table("WHAT TO DO", &["SETTING", "VALUE"], &actions, w);
+        if width >= 100 {
+            rows.extend(self.pair(width, when, actions));
+        } else {
+            rows.extend(when(width));
+            rows.extend(actions(width));
+        }
         rows.extend(self.text(
             "Values used by this Watch, not the daemon's loaded settings.",
             width,
