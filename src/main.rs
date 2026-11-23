@@ -8,6 +8,7 @@ mod metrics;
 mod pressure_relief;
 mod triggers;
 mod ui;
+mod watch_layout;
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -297,7 +298,13 @@ fn render_status_dashboard(
     watch_mode: bool,
     interval: u64,
 ) {
-    let w = terminal_width();
+    let layout = watch_mode.then(|| watch_layout::Layout::new(p));
+    let w = if watch_mode { ui::watch_terminal_width() } else { terminal_width() };
+    let terminal_value = |value: &str| if watch_mode {
+        watch_layout::escape_controls(value)
+    } else {
+        value.to_owned()
+    };
     let two_col = w >= 96;
     let col_inner = if two_col {
         ((w - 1) / 2).saturating_sub(4)
@@ -331,7 +338,12 @@ fn render_status_dashboard(
         mem.swap_used_percent(),
         snap.load_avg_1m
     );
-    print_banner(&format!("keep-ram-clean v{VERSION}"), &center, badge, badge_col, w, p);
+    let title = format!("keep-ram-clean v{VERSION}");
+    if let Some(layout) = &layout {
+        layout.print(layout.banner(&title, &center, badge, badge_col, w));
+    } else {
+        print_banner(&title, &center, badge, badge_col, w, p);
+    }
 
     // --- Left Panel: MEMORY, SWAP & TMPFS ---
     let mut left_lines: Vec<String> = Vec::new();
@@ -387,7 +399,7 @@ fn render_status_dashboard(
         let col = p.severity_color(pct, tmp_warn, tmp_crit);
         left_lines.push(format!(
             "{:<5} {bar} {col}{:>5.1}%{} {}/{}",
-            truncate_str(&m.mountpoint, 5),
+            if watch_mode { terminal_value(&m.mountpoint) } else { truncate_str(&m.mountpoint, 5) },
             pct,
             p.nc,
             fmt_mib(m.used_mb),
@@ -416,7 +428,7 @@ fn render_status_dashboard(
                 let tag = if s.is_zram() { "[zram]" } else { "" };
                 format!(
                     "{}{tag} {}/{}",
-                    s.path,
+                    terminal_value(&s.path),
                     fmt_mib(s.used_mb),
                     fmt_mib(s.size_mb)
                 )
@@ -467,7 +479,7 @@ fn render_status_dashboard(
             p.dim,
             proc.pid,
             p.nc,
-            truncate_str(&proc.comm, name_w),
+            if watch_mode { terminal_value(&proc.comm) } else { truncate_str(&proc.comm, name_w) },
             fmt_mib_f64(proc.rss_mb),
             p.dim,
             frac * 100.0,
@@ -475,7 +487,17 @@ fn render_status_dashboard(
         ));
     }
 
-    if two_col {
+    if let Some(layout) = &layout {
+        let free_badge = format!("{} free", fmt_mib(mem.available_mb));
+        let top_badge = format!("Top {}", top_procs.len());
+        let left = Panel {
+            title: "MEMORY · SWAP · TMPFS", badge: &free_badge, badge_col: p.green, lines: &left_lines,
+        };
+        let right = Panel {
+            title: "PRESSURE & TOP CONSUMERS", badge: &top_badge, badge_col: p.cyan, lines: &right_lines,
+        };
+        layout.print(layout.columns(&left, &right, w));
+    } else if two_col {
         let free_badge = format!("{} free", fmt_mib(mem.available_mb));
         let top_badge = format!("Top {}", top_procs.len());
         print_two_panels(
@@ -499,10 +521,63 @@ fn render_status_dashboard(
         print_panel("PRESSURE & TOP CONSUMERS", "", "", &right_lines, w, p);
     }
 
-    // --- Bottom Full-Width Panel: AUTO-CLEAN VISUALS & TRIGGERS ---
-    // This full-width panel pads by character count. The lightning emoji
-    // occupies two terminal cells and makes full rows wrap on some terminals.
+    // Bottom panel shares the same activity fields and history limit as before.
+    let auto_lines = status_activity_lines(cfg, p, daemon_state.as_ref(), terminal_value);
+
+    let (act_badge, act_col) = if cleaning_now {
+        ("CLEANING", p.yellow)
+    } else {
+        ("STANDBY", p.dim)
+    };
+    if let Some(layout) = &layout {
+        let panel = Panel {
+            title: "AUTO-CLEAN ACTIVITY & TRIGGERS", badge: act_badge, badge_col: act_col, lines: &auto_lines,
+        };
+        layout.print(layout.panel(&panel, w));
+    } else {
+        print_panel("AUTO-CLEAN ACTIVITY & TRIGGERS", act_badge, act_col, &auto_lines, w, p);
+    }
+
+    if let Some(msg) = toast {
+        let toast_line = format!("  {}{}{}", p.cyan, terminal_value(msg), p.nc);
+        if let Some(layout) = &layout {
+            layout.print(layout.text(&toast_line, w));
+        } else {
+            println!("{toast_line}");
+        }
+    }
+    if watch_mode {
+        let controls = format!(
+            "  {}[c]{} Clean now   {}[+/-]{} RAM trigger ({:.0}%)   {}[n]{} Alerts   {}[r]{} Reload   {}[q]{} Quit   {}({}s refresh){}",
+            p.bold,
+            p.nc,
+            p.bold,
+            p.nc,
+            t.ram_used_percent,
+            p.bold,
+            p.nc,
+            p.bold,
+            p.nc,
+            p.bold,
+            p.nc,
+            p.dim,
+            interval,
+            p.nc
+        );
+        if let Some(layout) = &layout {
+            layout.print(layout.text(&controls, w));
+        }
+    }
+}
+
+fn status_activity_lines(
+    cfg: &Config,
+    p: &Palette,
+    daemon_state: Option<&daemon::DaemonState>,
+    terminal_value: impl Fn(&str) -> String,
+) -> Vec<String> {
     const ACTIVITY_MARKER: &str = "*";
+    let t = &cfg.triggers;
     let mut auto_lines: Vec<String> = Vec::new();
     let notif_pill = if cfg.notifications.enabled {
         format!("{}ON{}", p.green, p.nc)
@@ -528,12 +603,12 @@ fn render_status_dashboard(
         t.psi_some_avg10,
         t.psi_full_avg10,
         t.cooldown_seconds,
-        sched_str
+        terminal_value(&sched_str)
     ));
 
-    if let Some(ds) = daemon_state.as_ref().filter(|d| d.alive) {
+    if let Some(ds) = daemon_state.filter(|d| d.alive) {
         if ds.cleaning_now {
-            let why = ds.cleaning_reason.as_deref().unwrap_or("Trigger fired");
+            let why = terminal_value(ds.cleaning_reason.as_deref().unwrap_or("Trigger fired"));
             auto_lines.push(format!(
                 "{}{}{ACTIVITY_MARKER} AUTO-CLEAN IN PROGRESS — {why}{}",
                 p.bold, p.yellow, p.nc
@@ -573,9 +648,9 @@ fn render_status_dashboard(
                     .steps
                     .iter()
                     .map(|s| match s.status.as_str() {
-                        "ok" => format!("{}✔{}{}", p.green, s.name, p.nc),
-                        "error" => format!("{}✖{}{}", p.red, s.name, p.nc),
-                        _ => format!("{}–{}{}", p.dim, s.name, p.nc),
+                        "ok" => format!("{}✔{}{}", p.green, terminal_value(&s.name), p.nc),
+                        "error" => format!("{}✖{}{}", p.red, terminal_value(&s.name), p.nc),
+                        _ => format!("{}–{}{}", p.dim, terminal_value(&s.name), p.nc),
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -591,7 +666,7 @@ fn render_status_dashboard(
                     -ev.swap_freed_mb,
                     p.nc,
                     ev.duration_seconds,
-                    ev.reasons.join("; "),
+                    terminal_value(&ev.reasons.join("; ")),
                     step_icons
                 ));
             }
@@ -603,35 +678,7 @@ fn render_status_dashboard(
         ));
     }
 
-    let (act_badge, act_col) = if cleaning_now {
-        ("CLEANING", p.yellow)
-    } else {
-        ("STANDBY", p.dim)
-    };
-    print_panel("AUTO-CLEAN ACTIVITY & TRIGGERS", act_badge, act_col, &auto_lines, w, p);
-
-    if let Some(msg) = toast {
-        println!("  {}{msg}{}", p.cyan, p.nc);
-    }
-    if watch_mode {
-        println!(
-            "  {}[c]{} Clean now   {}[+/-]{} RAM trigger ({:.0}%)   {}[n]{} Alerts   {}[r]{} Reload   {}[q]{} Quit   {}({}s refresh){}",
-            p.bold,
-            p.nc,
-            p.bold,
-            p.nc,
-            t.ram_used_percent,
-            p.bold,
-            p.nc,
-            p.bold,
-            p.nc,
-            p.bold,
-            p.nc,
-            p.dim,
-            interval,
-            p.nc
-        );
-    }
+    auto_lines
 }
 
 fn cmd_status(

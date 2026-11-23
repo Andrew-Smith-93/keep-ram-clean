@@ -58,15 +58,23 @@ impl Palette {
 
 /// Detect full terminal width via TIOCGWINSZ (falls back to $COLUMNS or 110).
 pub fn terminal_width() -> usize {
+    terminal_width_with_minimum(60)
+}
+
+pub(crate) fn watch_terminal_width() -> usize {
+    terminal_width_with_minimum(10)
+}
+
+fn terminal_width_with_minimum(minimum: usize) -> usize {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0
-        && ws.ws_col >= 60
+        && usize::from(ws.ws_col) >= minimum
     {
         return ws.ws_col as usize;
     }
     if let Ok(cols) = env::var("COLUMNS") {
         if let Ok(n) = cols.parse::<usize>() {
-            if n >= 60 {
+            if n >= minimum {
                 return n;
             }
         }
