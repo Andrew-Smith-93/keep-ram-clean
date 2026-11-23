@@ -14,12 +14,11 @@ pub(crate) struct Report<'a> {
     pub(crate) interval: u64,
 }
 
-/// A single-row six-cell track with strong end caps in color and plain terminals.
-fn outlined_meter(ratio: f64, color: &str, p: &Palette) -> String {
-    const WIDTH: usize = 6;
+/// Separate glyph rows make both edges visible regardless of font or ANSI support.
+fn meter_track(cells: usize, ratio: f64, color: &str, p: &Palette) -> [String; 3] {
     const FRACTIONS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
     let filled = if ratio.is_finite() && ratio > 0.0 {
-        (ratio.clamp(0.0, 1.0) * (WIDTH * 8) as f64)
+        (ratio.clamp(0.0, 1.0) * (cells * 8) as f64)
             .round()
             .max(1.0) as usize
     } else {
@@ -31,15 +30,38 @@ fn outlined_meter(ratio: f64, color: &str, p: &Palette) -> String {
     if partial > 0 {
         active.push(FRACTIONS[partial]);
     }
-    let empty = "·".repeat(WIDTH - full - usize::from(partial > 0));
+    let empty = "·".repeat(cells - full - usize::from(partial > 0));
     let bold = p.bold;
     let reset = p.nc;
     let dim = p.dim;
-    format!("{bold}[{reset}{color}{active}{reset}{dim}{empty}{reset}{bold}]{reset}")
+    let rule = "─".repeat(cells);
+    [
+        format!("╭{rule}╮"),
+        format!("│{color}{active}{reset}{dim}{empty}{reset}│"),
+        format!("{bold}╰{rule}╯{reset}"),
+    ]
+}
+
+fn recessed_meter(
+    number: &str,
+    number_width: usize,
+    ratio: f64,
+    width: usize,
+    color: &str,
+    p: &Palette,
+) -> String {
+    let cells = width.saturating_sub(8).clamp(2, 6);
+    let [top, middle, bottom] = meter_track(cells, ratio, color, p);
+    if width < 24 {
+        format!("{}\n{top}\n{middle}\n{bottom}", number.trim())
+    } else {
+        let inset = " ".repeat(number_width + 1);
+        format!("{inset}{top}\n{number} {middle}\n{inset}{bottom}")
+    }
 }
 
 /// The bars compare only the listed processes; percentages remain absolute.
-fn ram_share(rss: f64, total_mib: u64, largest_rss: f64, p: &Palette) -> String {
+fn ram_share(rss: f64, total_mib: u64, largest_rss: f64, width: usize, p: &Palette) -> String {
     let percent = if total_mib == 0 || !rss.is_finite() || rss < 0.0 {
         "n/a".into()
     } else {
@@ -58,7 +80,14 @@ fn ram_share(rss: f64, total_mib: u64, largest_rss: f64, p: &Palette) -> String 
     } else {
         0.0
     };
-    format!("{percent:>5} {}", outlined_meter(ratio, p.cyan, p))
+    recessed_meter(
+        &format!("{percent:>5}"),
+        percent.len().max(5),
+        ratio,
+        width,
+        p.cyan,
+        p,
+    )
 }
 
 impl Report<'_> {
@@ -67,7 +96,7 @@ impl Report<'_> {
         let width = frame_width - 4;
         let layout = Layout::board(p);
         // Keep a common right-column anchor on the wide canvas.
-        let left_lane = if width >= 112 { 61 } else { (width - 1) / 2 };
+        let left_lane = if width >= 112 { 60 } else { (width - 1) / 2 };
         let snap = self.snapshot;
         let mem = &snap.memory;
         let t = &self.config.triggers;
@@ -91,8 +120,15 @@ impl Report<'_> {
         let utilization = |value, warning, critical| {
             let color = p.severity_color(value, warning, critical);
             let reset = p.nc;
-            let bar = outlined_meter(value / 100.0, color, p);
-            format!("{color}{value:>5.1}%{reset} {bar}")
+            let number = format!("{value:>5.1}%");
+            recessed_meter(
+                &format!("{color}{number}{reset}"),
+                number.len(),
+                value / 100.0,
+                frame_width,
+                color,
+                p,
+            )
         };
         let ram = if t.ram_used_percent > 0.0 {
             t.ram_used_percent
@@ -190,7 +226,7 @@ impl Report<'_> {
                     proc.pid.to_string(),
                     escape_controls(&proc.comm),
                     fmt_mib_f64(proc.rss_mb),
-                    ram_share(proc.rss_mb, mem.total_mb, largest_rss, p),
+                    ram_share(proc.rss_mb, mem.total_mb, largest_rss, frame_width, p),
                 ]
             })
             .collect();
@@ -432,7 +468,7 @@ mod tests {
     use crate::metrics::{MemoryInfo, PsiMemory, SwapDevice, TmpfsMount};
 
     #[test]
-    fn outlined_meter_keeps_one_fixed_width_row_in_every_fill_state() {
+    fn recessed_meter_has_visible_edges_in_every_fill_state() {
         let p = Palette {
             color: false,
             bold: "",
@@ -444,15 +480,14 @@ mod tests {
             nc: "",
         };
         for (ratio, expected) in [
-            (0.0, "[······]"),
-            (1.0 / 48.0, "[▏·····]"),
-            (0.5, "[███···]"),
-            (1.0, "[██████]"),
+            (0.0, "│······│"),
+            (1.0 / 48.0, "│▏·····│"),
+            (0.5, "│███···│"),
+            (1.0, "│██████│"),
         ] {
-            let bar = outlined_meter(ratio, p.cyan, &p);
-            assert_eq!(bar, expected);
-            assert_eq!(bar.chars().count(), 8);
-            assert!(!bar.contains('\n'));
+            let bar = meter_track(6, ratio, p.cyan, &p);
+            assert_eq!(bar, ["╭──────╮", expected, "╰──────╯"]);
+            assert!(bar.iter().all(|row| row.chars().count() == 8));
         }
     }
 
@@ -478,19 +513,25 @@ mod tests {
         ];
         let mut bars = Vec::new();
         for (rss, expected) in cases {
-            let rendered = ram_share(rss, 8192, 4096.0, &p);
-            let (number, bar) = rendered.trim().split_once(' ').unwrap();
+            let rendered = ram_share(rss, 8192, 4096.0, 120, &p);
+            let (number, bar) = rendered
+                .lines()
+                .nth(1)
+                .unwrap()
+                .trim()
+                .split_once(' ')
+                .unwrap();
             assert_eq!(number, expected);
-            assert!(bar.starts_with('[') && bar.ends_with(']'));
+            assert!(bar.starts_with('│') && bar.ends_with('│'));
             assert_eq!(bar.chars().count(), 8);
             bars.push(bar.to_owned());
         }
         let unique = bars.iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), cases.len());
-        assert_eq!(bars[0], "[······]");
-        assert_eq!(bars[cases.len() - 1], "[██████]");
-        assert!(ram_share(41.0, 0, 4096.0, &p).contains("n/a"));
-        assert!(ram_share(0.1, 8192, 4096.0, &p).contains("<0.01%"));
+        assert_eq!(bars[0], "│······│");
+        assert_eq!(bars[cases.len() - 1], "│██████│");
+        assert!(ram_share(41.0, 0, 4096.0, 120, &p).contains("n/a"));
+        assert!(ram_share(0.1, 8192, 4096.0, 120, &p).contains("<0.01%"));
     }
 
     #[test]
@@ -798,7 +839,7 @@ mod tests {
             red: "\x1b[0;31m",
             nc: "\x1b[0m",
         };
-        for (width, previous_normal, previous_dense) in [(80, 60, 81), (120, 45, 63)] {
+        for (width, previous_normal, previous_dense) in [(80, 56, 77), (120, 39, 50)] {
             let normal_plain = normal.render(width, &p);
             let dense_plain = report.render(width, &p);
             println!(
@@ -806,8 +847,9 @@ mod tests {
                 normal_plain.len(),
                 dense_plain.len()
             );
-            assert!(normal_plain.len() < previous_normal);
-            assert!(dense_plain.len() < previous_dense);
+            // Four meters, two visible rails per meter; no extra spacer rows.
+            assert!(normal_plain.len() <= previous_normal + 8);
+            assert!(dense_plain.len() <= previous_dense + 8);
             for (fixture, plain) in [(&normal, normal_plain), (&report, dense_plain)] {
                 let ansi = fixture.render(width, &colored);
                 assert_eq!(ansi.len(), plain.len());

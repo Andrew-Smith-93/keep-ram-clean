@@ -499,6 +499,7 @@ impl<'a> Layout<'a> {
         rows: &[Vec<String>],
         width: usize,
     ) -> Vec<String> {
+        let is_meter = |header: &str| !self.framed && matches!(header, "USAGE" | "RAM SHARE");
         let inner = width - 4;
         let mut frame_width = width;
         let delimiter = if self.framed { "│ " } else { " │ " };
@@ -531,7 +532,16 @@ impl<'a> Layout<'a> {
                 .enumerate()
                 .map(|(i, h)| {
                     rows.iter()
-                        .map(|r| self.width(&r[i]))
+                        .map(|r| {
+                            if is_meter(h) {
+                                r[i].lines()
+                                    .map(|line| self.width(line))
+                                    .max()
+                                    .unwrap_or_default()
+                            } else {
+                                self.width(&r[i])
+                            }
+                        })
                         .max()
                         .unwrap_or(0)
                         .max(self.width(h))
@@ -566,29 +576,38 @@ impl<'a> Layout<'a> {
                 .max(self.width(title) + 5)
                 .min(width);
             let wrapped = |row: &[String], heading: bool| {
+                let meter_row = !heading && headers.iter().any(|h| is_meter(h));
                 let cells: Vec<_> = row
                     .iter()
                     .zip(&sizes)
                     .zip(headers)
                     .map(|((value, &size), &header)| {
-                        let lines = self.body(value, size);
-                        if !self.framed
-                            && !heading
-                            && matches!(header, "USED" | "TOTAL" | "RSS" | "PID" | "AMOUNT")
-                        {
-                            lines
-                                .into_iter()
-                                .map(|line| {
-                                    let value = line.trim_end();
-                                    format!(
-                                        "{}{value}",
-                                        " ".repeat(size.saturating_sub(self.width(value)))
-                                    )
-                                })
+                        let meter = !heading && is_meter(header);
+                        let mut lines = if meter {
+                            value
+                                .lines()
+                                .flat_map(|line| self.body(line, size))
                                 .collect()
                         } else {
-                            lines
+                            self.body(value, size)
+                        };
+                        if !self.framed
+                            && !heading
+                            && (meter
+                                || matches!(header, "USED" | "TOTAL" | "RSS" | "PID" | "AMOUNT"))
+                        {
+                            for line in &mut lines {
+                                let value = line.trim_end();
+                                *line = format!(
+                                    "{}{value}",
+                                    " ".repeat(size.saturating_sub(self.width(value)))
+                                );
+                            }
                         }
+                        if meter_row && !meter {
+                            lines.insert(0, " ".repeat(size));
+                        }
+                        lines
                     })
                     .collect();
                 let height = cells.iter().map(Vec::len).max().unwrap_or(1);
@@ -627,7 +646,28 @@ impl<'a> Layout<'a> {
                 if i > 0 {
                     lines.push(String::new());
                 }
-                lines.extend(headers.iter().zip(row).map(|(h, v)| format!("{h}: {v}")));
+                for (header, value) in headers.iter().zip(row) {
+                    if is_meter(header) {
+                        let parts = value.lines().collect::<Vec<_>>();
+                        let lead = format!("{header}: ");
+                        if parts.len() == 3
+                            && parts
+                                .iter()
+                                .all(|s| self.width(s) + self.width(&lead) <= inner)
+                        {
+                            let indent = " ".repeat(self.width(&lead));
+                            for (i, part) in parts.into_iter().enumerate() {
+                                let prefix = if i == 1 { &lead } else { &indent };
+                                lines.push(format!("{prefix}{part}"));
+                            }
+                        } else {
+                            lines.push(lead.trim_end().to_owned());
+                            lines.extend(parts.into_iter().map(str::to_owned));
+                        }
+                    } else {
+                        lines.push(format!("{header}: {value}"));
+                    }
+                }
             }
         }
         self.table_surface(
