@@ -492,6 +492,23 @@ impl<'a> Layout<'a> {
             .collect()
     }
 
+    /// Join the bottom of one six-cell meter and the top of the next.
+    /// Work on the formatted rows so ANSI and differences in caption width do
+    /// not shift the join. Only the new, otherwise blank top row is discarded.
+    fn shared_meter_rail(&self, previous: &mut String, next: &str) -> bool {
+        const TOP: &str = "╭──────╮";
+        const BOTTOM: &str = "╰──────╯";
+        const JOINT: &str = "├──────┤";
+        let (Some(bottom_at), Some(top_at)) = (previous.rfind(BOTTOM), next.rfind(TOP)) else {
+            return false;
+        };
+        if self.width(&previous[..bottom_at]) != self.width(&next[..top_at]) {
+            return false;
+        }
+        previous.replace_range(bottom_at..bottom_at + BOTTOM.len(), JOINT);
+        true
+    }
+
     pub(crate) fn table(
         &self,
         title: &str,
@@ -638,12 +655,20 @@ impl<'a> Layout<'a> {
                         .join("─┼─"),
                 );
             }
+            let meters = headers.iter().any(|header| is_meter(header));
             for row in rows {
-                lines.extend(wrapped(row, false));
+                let block = wrapped(row, false);
+                let join = meters
+                    && lines
+                        .last_mut()
+                        .zip(block.first())
+                        .is_some_and(|(previous, next)| self.shared_meter_rail(previous, next));
+                lines.extend(block.into_iter().skip(usize::from(join)));
             }
         } else {
+            let meters = headers.iter().any(|header| is_meter(header));
             for (i, row) in rows.iter().enumerate() {
-                if i > 0 {
+                if i > 0 && !meters {
                     lines.push(String::new());
                 }
                 for (header, value) in headers.iter().zip(row) {
@@ -913,6 +938,21 @@ mod tests {
             .chars()
             .filter(|ch| !ch.is_whitespace() && *ch != '│')
             .collect()
+    }
+
+    #[test]
+    fn adjacent_rails_join_with_styles_and_keep_the_previous_row_contents() {
+        for color in [false, true] {
+            let p = palette(color);
+            let layout = Layout::board(&p);
+            let mut bottom = format!("尾 {bold}╰──────╯{nc}", bold = p.bold, nc = p.nc);
+            let top = format!("   {dim}╭──────╮{nc}", dim = p.dim, nc = p.nc);
+            assert!(layout.shared_meter_rail(&mut bottom, &top));
+            assert_eq!(visible(&layout, &bottom), "尾 ├──────┤");
+            let mut misaligned = "  ╰──────╯".to_owned();
+            assert!(!layout.shared_meter_rail(&mut misaligned, &top));
+            assert_eq!(misaligned, "  ╰──────╯");
+        }
     }
 
     #[test]
