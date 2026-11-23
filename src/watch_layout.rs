@@ -65,7 +65,7 @@ impl<'a> Layout<'a> {
             .unwrap_or_default();
         let headings = groups
             .iter()
-            .map(|(title, _)| self.width(title) + 1)
+            .map(|(title, _)| self.width(title) + 2)
             .max()
             .unwrap_or_default();
         let area = (width - 4).min(content.max(headings).max(1));
@@ -76,18 +76,18 @@ impl<'a> Layout<'a> {
         };
         let mut output = Vec::new();
         for (title, rows) in groups {
-            if self.width(title) < area {
-                let fill = "─".repeat(inner - self.width(title) - 3);
+            if self.width(title) + 2 <= area {
+                let fill = "─".repeat(inner - self.width(title) - 4);
                 output.push(format!(
-                    "{}╭─ {}{title}{} {}{fill}╮{}",
+                    "{}╭── {}{title}{} {}{fill}╮{}",
                     p.cyan, p.bold, p.nc, p.cyan, p.nc
                 ));
             } else {
                 output.push(format!("{}╭{}╮{}", p.cyan, "─".repeat(inner), p.nc));
                 output.extend(
-                    self.text(&format!("{}{title}{}", p.bold, p.nc), area)
+                    self.text(&format!("{}{title}{}", p.bold, p.nc), area - 2)
                         .iter()
-                        .map(|row| line(row)),
+                        .map(|row| line(&format!("  {row}"))),
                 );
             }
             output.extend(rows.iter().map(|row| line(row)));
@@ -374,13 +374,13 @@ impl<'a> Layout<'a> {
                 widths[slot] -= 1;
             }
             frame_width = 4 + 9 + widths.iter().sum::<usize>();
-            let table_row = |cells: [&str; 4]| {
+            let table_row = |cells: [&str; 4], heading: bool| {
                 let columns: Vec<_> = cells
                     .iter()
                     .enumerate()
                     .map(|(i, text)| {
                         let mut body = self.body(text, widths[i]);
-                        if i >= 2 {
+                        if i >= 2 && (self.framed || !heading) {
                             for line in &mut body {
                                 let text = line.trim_end();
                                 *line =
@@ -407,10 +407,10 @@ impl<'a> Layout<'a> {
                     })
                     .collect::<Vec<_>>()
             };
-            rows.extend(table_row(headers));
+            rows.extend(table_row(headers, true));
             rows.push(widths.map(|width| "─".repeat(width)).join("─┼─"));
             for record in &records {
-                rows.extend(table_row(record.each_ref().map(String::as_str)));
+                rows.extend(table_row(record.each_ref().map(String::as_str), false));
             }
         } else {
             for (index, device) in devices.iter().enumerate() {
@@ -564,14 +564,17 @@ impl<'a> Layout<'a> {
             frame_width = (4 + gaps + sizes.iter().sum::<usize>())
                 .max(self.width(title) + 5)
                 .min(width);
-            let wrapped = |row: &[String]| {
+            let wrapped = |row: &[String], heading: bool| {
                 let cells: Vec<_> = row
                     .iter()
                     .zip(&sizes)
                     .zip(headers)
                     .map(|((value, &size), &header)| {
                         let lines = self.body(value, size);
-                        if !self.framed && matches!(header, "USED" | "TOTAL" | "RSS") {
+                        if !self.framed
+                            && !heading
+                            && matches!(header, "USED" | "TOTAL" | "RSS" | "PID" | "AMOUNT")
+                        {
                             lines
                                 .into_iter()
                                 .map(|line| {
@@ -604,6 +607,7 @@ impl<'a> Layout<'a> {
                     .iter()
                     .map(|s| format!("{}{s}{}", self.p.bold, self.p.nc))
                     .collect::<Vec<_>>(),
+                true,
             ));
             if !self.framed {
                 lines.push(
@@ -615,7 +619,7 @@ impl<'a> Layout<'a> {
                 );
             }
             for row in rows {
-                lines.extend(wrapped(row));
+                lines.extend(wrapped(row, false));
             }
         } else {
             for (i, row) in rows.iter().enumerate() {

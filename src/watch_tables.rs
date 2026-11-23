@@ -1,7 +1,7 @@
 //! Read-only formatter for information collected by the original Watch loop.
 use crate::daemon::DaemonState;
 use crate::metrics::{ProcessInfo, SystemSnapshot};
-use crate::ui::{fmt_mib, fmt_mib_f64, gauge_bar, mini_bar, psi_badge, Palette};
+use crate::ui::{fmt_mib, fmt_mib_f64, gauge_bar, psi_badge, Palette};
 use crate::watch_layout::{escape_controls, Layout};
 use crate::Config;
 
@@ -12,6 +12,44 @@ pub(crate) struct Report<'a> {
     pub(crate) daemon: Option<&'a DaemonState>,
     pub(crate) toast: Option<&'a str>,
     pub(crate) interval: u64,
+}
+
+/// Use eighth-cell increments so everyday low-RSS processes don't all look empty.
+/// The bars compare only the listed processes; percentages remain absolute.
+fn ram_share(rss: f64, total_mib: u64, largest_rss: f64, p: &Palette) -> String {
+    const WIDTH: usize = 6;
+    const FRACTIONS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    let percent = if total_mib == 0 || !rss.is_finite() || rss < 0.0 {
+        "n/a".into()
+    } else {
+        let pct = rss / total_mib as f64 * 100.0;
+        if pct > 0.0 && pct < 0.005 {
+            "<0.01%".into()
+        } else if pct < 1.0 && pct > 0.0 {
+            format!("{pct:.2}%")
+        } else {
+            format!("{pct:.1}%")
+        }
+    };
+    let filled = if rss.is_finite() && largest_rss.is_finite() && rss > 0.0 && largest_rss > 0.0 {
+        // The square root spreads tiny shares out even when the top process is huge.
+        ((rss / largest_rss).clamp(0.0, 1.0).sqrt() * (WIDTH * 8) as f64)
+            .round()
+            .max(1.0) as usize
+    } else {
+        0
+    };
+    let full = filled / 8;
+    let partial = filled % 8;
+    let mut active = "█".repeat(full);
+    if partial > 0 {
+        active.push(FRACTIONS[partial]);
+    }
+    let empty = "·".repeat(WIDTH - full - usize::from(partial > 0));
+    format!(
+        "{percent:>6} {}{active}{}{}{empty}{}",
+        p.cyan, p.nc, p.dim, p.nc
+    )
 }
 
 impl Report<'_> {
@@ -131,16 +169,21 @@ impl Report<'_> {
                 format!("{} / {:.2}", snap.cpu_count, snap.load_ratio()),
             ]);
         }
+        let largest_rss = self
+            .processes
+            .iter()
+            .map(|proc| proc.rss_mb)
+            .filter(|rss| rss.is_finite())
+            .fold(0.0, f64::max);
         let consumers: Vec<_> = self
             .processes
             .iter()
             .map(|proc| {
-                let frac = proc.rss_mb / mem.total_mb.max(1) as f64;
                 vec![
                     proc.pid.to_string(),
                     escape_controls(&proc.comm),
                     fmt_mib_f64(proc.rss_mb),
-                    format!("{} {:.1}%", mini_bar(frac, 5, p), frac * 100.0),
+                    ram_share(proc.rss_mb, mem.total_mb, largest_rss, p),
                 ]
             })
             .collect();
@@ -164,12 +207,14 @@ impl Report<'_> {
                     w,
                 )
             } else {
-                layout.table(
+                let mut table = layout.table(
                     &format!("TOP {} CONSUMERS", consumers.len()),
                     &["PID", "PROCESS", "RSS", "RAM SHARE"],
                     &consumers,
                     w,
-                )
+                );
+                table.extend(layout.text("  Bars: √(RSS / largest listed RSS); %: total RAM", w));
+                table
             }
         };
         let mut live = Vec::new();
@@ -380,6 +425,42 @@ mod tests {
     use crate::metrics::{MemoryInfo, PsiMemory, SwapDevice, TmpfsMount};
 
     #[test]
+    fn relative_bars_distinguish_small_through_high_rss_without_changing_percentages() {
+        let p = Palette {
+            color: false,
+            bold: "",
+            dim: "",
+            green: "",
+            cyan: "",
+            yellow: "",
+            red: "",
+            nc: "",
+        };
+        let cases = [
+            (0.0, "0.0%"),
+            (16.0, "0.20%"),
+            (41.0, "0.50%"),
+            (196.0, "2.4%"),
+            (640.0, "7.8%"),
+            (4096.0, "50.0%"),
+        ];
+        let mut bars = Vec::new();
+        for (rss, expected) in cases {
+            let rendered = ram_share(rss, 8192, 4096.0, &p);
+            let (number, bar) = rendered.trim().split_once(' ').unwrap();
+            assert_eq!(number, expected);
+            assert_eq!(bar.chars().count(), 6);
+            bars.push(bar.to_owned());
+        }
+        let unique = bars.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), cases.len());
+        assert_eq!(bars[0], "······");
+        assert_eq!(bars[cases.len() - 1], "██████");
+        assert!(ram_share(41.0, 0, 4096.0, &p).contains("n/a"));
+        assert!(ram_share(0.1, 8192, 4096.0, &p).contains("<0.01%"));
+    }
+
+    #[test]
     fn scrolling_reaches_first_and_last_rows_without_dropping_them() {
         let rows = (0..40).map(|i| format!("row {i}")).collect::<Vec<_>>();
         let mut offset = 0;
@@ -512,7 +593,34 @@ mod tests {
         if std::env::var_os("KRC_TEST_WATCH_PTY").is_some() {
             let width = crate::ui::watch_terminal_width();
             println!("PTY-WATCH-{width}-BEGIN");
-            if std::env::var_os("KRC_TEST_WATCH_PTY_UNICODE").is_some() {
+            if std::env::var_os("KRC_TEST_WATCH_PTY_SHARES").is_some() {
+                let processes = [
+                    ("high", 4096.0),
+                    ("mid-high", 640.0),
+                    ("ordinary", 196.0),
+                    ("low-b", 41.0),
+                    ("low-a", 16.0),
+                    ("zero", 0.0),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (name, rss_mb))| ProcessInfo {
+                    pid: i as i32 + 100,
+                    uid: 1000,
+                    comm: name.into(),
+                    cmdline: String::new(),
+                    rss_mb,
+                    starttime: None,
+                })
+                .collect::<Vec<_>>();
+                let shares = Report {
+                    processes: &processes,
+                    ..normal
+                };
+                for line in shares.render(width, &Palette::detect()) {
+                    println!("{line}");
+                }
+            } else if std::env::var_os("KRC_TEST_WATCH_PTY_UNICODE").is_some() {
                 let mut unicode_snapshot = normal_snapshot.clone();
                 unicode_snapshot.tmpfs_mounts[0].mountpoint = "/run/資料/Cafe\u{301}-tail".into();
                 let unicode = Report {
@@ -605,6 +713,48 @@ mod tests {
         assert!(narrow
             .lines()
             .any(|row| row.contains("METRIC") && row.contains("READING")));
+        for width in [36, 80, 120, 200, 240] {
+            let rows = normal.render(width, &p);
+            let column = |label: &str| {
+                let row = rows.iter().find(|line| line.contains(label)).unwrap();
+                row[..row.find(label).unwrap()].chars().count()
+            };
+            for (title, table) in [
+                ("01  LIVE READINGS", "MEMORY · SWAP · TMPFS"),
+                ("02  RESOURCE DETAILS", "RAM DETAILS"),
+                ("03  AUTO-CLEAN", "DAEMON STATE"),
+            ] {
+                assert_eq!(column(title), column(table));
+            }
+            if width >= 80 {
+                for (lead, headings) in [
+                    ("RESOURCE", &["RESOURCE", "USED", "TOTAL", "USAGE"][..]),
+                    ("PROCESS", &["PID", "PROCESS", "RSS", "RAM SHARE"]),
+                    ("DEVICE / PATH", &["DEVICE / PATH", "TYPE", "USED", "SIZE"]),
+                ] {
+                    let row = rows
+                        .iter()
+                        .find(|line| {
+                            line.contains(lead) && headings.iter().all(|h| line.contains(h))
+                        })
+                        .unwrap();
+                    let row = if lead == "PROCESS" && row.contains('║') {
+                        row.split_once('║').unwrap().1
+                    } else {
+                        row.split_once('│').unwrap().1
+                    };
+                    let cells = row.split('│').take(headings.len()).collect::<Vec<_>>();
+                    for (i, (cell, header)) in cells.iter().zip(headings).enumerate() {
+                        if i > 0 {
+                            assert!(
+                                cell.strip_prefix(' ').unwrap().starts_with(header),
+                                "{width}: {cell:?}, {header}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let colored = Palette {
             color: true,
             bold: "\x1b[1m",
