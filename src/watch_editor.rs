@@ -56,6 +56,15 @@ const GRID_ORDER: [usize; FIELDS.len()] = [
     0, 1, 2, 3, 4, 5, 6, 12, 13, 14, 7, 8, 9, 10, 11, 15, 16, 17, 18,
 ];
 
+pub(crate) fn next_field(selected: usize, forward: bool) -> usize {
+    let pos = GRID_ORDER.iter().position(|&i| i == selected).unwrap();
+    GRID_ORDER[if forward {
+        (pos + 1).min(FIELDS.len() - 1)
+    } else {
+        pos.saturating_sub(1)
+    }]
+}
+
 pub(crate) fn display_value(index: usize, raw: &str) -> String {
     match FIELDS[index].1 {
         "%" | "% avg10" => format!("{raw}%"),
@@ -231,10 +240,19 @@ pub(crate) struct Editor {
 }
 
 impl Editor {
-    pub(crate) fn open(cfg: &Config, preset: Option<SystemPreset>) -> Result<Self, String> {
+    #[cfg(test)]
+    fn open(cfg: &Config, preset: Option<SystemPreset>) -> Result<Self, String> {
+        Self::open_at(cfg, preset, 0)
+    }
+
+    pub(crate) fn open_at(
+        cfg: &Config,
+        preset: Option<SystemPreset>,
+        selected: usize,
+    ) -> Result<Self, String> {
         Ok(Self {
             draft: WatchConfigDraft::open(cfg.source_path.as_deref())?,
-            selected: 0,
+            selected,
             mode: Mode::Browse,
             buffer: String::new(),
             review_page: 0,
@@ -320,13 +338,7 @@ impl Editor {
         match self.mode {
             Mode::Browse => match key {
                 b'j' | b'k' => {
-                    let pos = GRID_ORDER.iter().position(|&i| i == self.selected).unwrap();
-                    let next = if key == b'j' {
-                        (pos + 1).min(FIELDS.len() - 1)
-                    } else {
-                        pos.saturating_sub(1)
-                    };
-                    self.selected = GRID_ORDER[next];
+                    self.selected = next_field(self.selected, key == b'j');
                 }
                 b'\r' | b'\n' => self.open_presets(),
                 b'w' if !self.changes().is_empty() => {
@@ -424,9 +436,9 @@ impl Editor {
                     FIELDS[i].1.into(),
                 ]);
                 let origin = if self.draft.original.setting_explicit(FIELDS[i].0) {
-                    "file"
+                    "saved value"
                 } else {
-                    "built-in fallback"
+                    "built-in default"
                 };
                 let proposal = match self.staged_source[i] {
                     Some(EditSource::Preset { system: true }) => "system preset",
@@ -679,7 +691,7 @@ mod tests {
             .review()
             .1
             .iter()
-            .any(|line| line.contains("built-in fallback → system preset")));
+            .any(|line| line.contains("built-in default → system preset")));
         assert_eq!(fs::read_to_string(&dest).unwrap(), missing);
         assert!(matches!(editor.input(b'\r'), Outcome::Save));
         let saved = editor.draft.save().unwrap();
@@ -715,7 +727,7 @@ mod tests {
             .review()
             .1
             .iter()
-            .any(|line| line.contains("file → system preset")));
+            .any(|line| line.contains("saved value → system preset")));
         assert!(editor
             .review()
             .1

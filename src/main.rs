@@ -823,6 +823,9 @@ fn cmd_status(
                 if let Some(active) = editor.as_mut() {
                     use watch_editor::Outcome;
                     let outcome = active.input(key);
+                    if let Some(selected) = active.selecting() {
+                        settings_page.selection = selected;
+                    }
                     if matches!(outcome, Outcome::Ignore) { continue; }
                     settings_page.follow();
                     match outcome {
@@ -844,13 +847,29 @@ fn cmd_status(
                     }
                     break;
                 }
-                if view == WatchView::Config && key == b'e' {
-                    settings_page.follow();
-                    match watch_editor::Editor::open(&cfg, settings_page.preset()) {
-                        Ok(opened) => { editor = Some(opened); settings_message.clear(); }
-                        Err(error) => settings_message = error,
+                if view == WatchView::Config {
+                    match key {
+                        b'j' | b'k' => {
+                            settings_page.selection = watch_editor::next_field(settings_page.selection, key == b'j');
+                            settings_page.follow();
+                            break;
+                        }
+                        b'e' | b'\r' | b'\n' => {
+                            settings_page.follow();
+                            match watch_editor::Editor::open_at(&cfg, settings_page.preset(), settings_page.selection) {
+                                Ok(mut opened) => {
+                                    if key != b'e' {
+                                        opened.input(key);
+                                    }
+                                    editor = Some(opened);
+                                    settings_message.clear();
+                                }
+                                Err(error) => settings_message = format!("Cannot edit: {error}"),
+                            }
+                            break;
+                        }
+                        _ => {}
                     }
-                    break;
                 }
                 let key = match watch_input(view, key) {
                     WatchInput::Quit => {

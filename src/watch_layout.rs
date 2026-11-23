@@ -9,6 +9,7 @@ unsafe extern "C" {
 pub(crate) struct SettingsPage {
     page: usize,
     manual: bool,
+    pub(crate) selection: usize,
     preset: std::cell::OnceCell<Option<crate::watch_editor::SystemPreset>>,
 }
 
@@ -767,19 +768,26 @@ impl<'a> Layout<'a> {
         cfg: &crate::Config,
         editor: Option<&crate::watch_editor::Editor>,
         width: usize,
+        focus: Option<usize>,
     ) -> Vec<String> {
         use crate::watch_editor::{display_value, source, values, GROUPS, LABELS};
         let p = self.p;
         let proposed = values(editor.map_or(cfg, |e| &e.draft.proposed));
         let shown =
             std::array::from_fn::<_, { LABELS.len() }, _>(|id| display_value(id, &proposed[id]));
-        let selected = editor.and_then(crate::watch_editor::Editor::selecting);
+        let selected = editor
+            .and_then(crate::watch_editor::Editor::selecting)
+            .or(focus);
         let label = |id: usize| {
             let focused = Some(id) == selected;
             let origin = source(editor.map_or(cfg, |e| &e.draft.original), id, editor);
             let changed = matches!(origin, 'M' | 'P');
             let arrow = if focused { '>' } else { ' ' };
-            let star = if changed { '*' } else { ' ' };
+            let marker = match origin {
+                'F' => '●',
+                'B' => '○',
+                _ => '*',
+            };
             let color = if focused {
                 p.cyan
             } else if changed {
@@ -787,7 +795,7 @@ impl<'a> Layout<'a> {
             } else {
                 ""
             };
-            format!("{color}{arrow}{star} {origin} {}{}", LABELS[id], p.nc)
+            format!("{color}{arrow}  {marker} {}{}", LABELS[id], p.nc)
         };
         let sizes = |groups: &[(&str, &[usize])]| {
             let labels = 5 + groups
@@ -976,10 +984,10 @@ impl<'a> Layout<'a> {
             if let Some(index) = editor.selecting() {
                 let current = display_value(index, &values(&editor.draft.proposed)[index]);
                 let origin = match source(&editor.draft.original, index, Some(editor)) {
-                    'F' => "file",
-                    'P' => "preset draft",
-                    'M' => "manual draft",
-                    _ => "built-in",
+                    'F' => "Saved",
+                    'P' => "Preset draft",
+                    'M' => "Manual draft",
+                    _ => "Built-in default",
                 };
                 let current = format!("{}  │  Current ({origin}): {current}", LABELS[index]);
                 if let Some((choices, selected)) = editor.choices() {
@@ -991,7 +999,7 @@ impl<'a> Layout<'a> {
                         .map(|(i, choice)| {
                             let marker = if i == selected { ">" } else { " " };
                             let detail = if choice.system {
-                                " (system recommendation)"
+                                " (recommended for this machine)"
                             } else {
                                 ""
                             };
@@ -1037,6 +1045,8 @@ impl<'a> Layout<'a> {
 
         let badge = if editor.is_some() {
             "NO AUTO-SAVE"
+        } else if cfg.source_path.is_some() && interactive {
+            "OVERVIEW"
         } else {
             "READ ONLY"
         };
@@ -1048,27 +1058,24 @@ impl<'a> Layout<'a> {
             width,
         );
         rows.extend(self.text(&format!("Source: {source}"), width));
-        rows.extend(self.settings_grid(cfg, editor, width));
-        rows.extend(self.text(
-            "F File · B Built-in · M Manual draft · P Preset draft",
-            width,
-        ));
+        rows.extend(self.settings_grid(cfg, editor, width, interactive.then_some(page.selection)));
+        rows.extend(self.text("● Saved  ○ Built-in default  * Staged (not saved)", width));
         let floor_key = crate::watch_editor::FIELDS[crate::watch_editor::FLOOR].0;
         let preset = match page.preset() {
             Some(preset) => format!(
-                "System preset preview: {} MiB floor · {:.1} GiB RAM{}",
+                "Recommended preset: {} MiB floor · {:.1} GiB RAM{}",
                 preset.floor_mib,
                 preset.ram_mib as f64 / 1024.0,
                 if editor
                     .map_or(cfg, |e| &e.draft.original)
                     .setting_explicit(floor_key)
                 {
-                    " · file wins"
+                    " · saved value unchanged"
                 } else {
-                    ""
+                    " · not applied"
                 }
             ),
-            None => "System preset unavailable: RAM size unknown".into(),
+            None => "Recommended preset unavailable: RAM size unknown".into(),
         };
         rows.extend(self.text(&preset, width));
         let on = |v| if v { "on" } else { "off" };
@@ -1109,9 +1116,19 @@ impl<'a> Layout<'a> {
                 rows.extend(self.text(&escape_controls(message), width));
             }
             if interactive {
-                rows.extend(self.text("[e] Edit  [s]/Esc Watch  [q] Quit", width));
+                let enter = if cfg.source_path.is_some() {
+                    "Enter Presets"
+                } else {
+                    "Enter Setup help"
+                };
+                rows.extend(self.text(
+                    &format!("j/k Select  {enter}  [s]/Esc Watch  [q] Quit"),
+                    width,
+                ));
+                Some(">")
+            } else {
+                None
             }
-            None
         };
         self.settings_page(rows, width, height, page, focus)
     }
@@ -1388,7 +1405,7 @@ mod tests {
                 .replace("SETTING", "")
                 .replace("VALUE", "");
             for item in [
-                "READONLY",
+                "OVERVIEW",
                 "SOURCE-END.toml",
                 "RAMused87%",
                 "Desktopnoticeson",
@@ -1412,9 +1429,9 @@ mod tests {
         for color in [false, true] {
             let p = palette(color);
             let layout = Layout::new(&p);
-            let grid = layout.settings_grid(&cfg, None, 80);
-            assert_eq!(grid, layout.settings_grid(&cfg, None, 120));
-            assert_eq!(grid, layout.settings_grid(&cfg, None, 200));
+            let grid = layout.settings_grid(&cfg, None, 80, None);
+            assert_eq!(grid, layout.settings_grid(&cfg, None, 120, None));
+            assert_eq!(grid, layout.settings_grid(&cfg, None, 200, None));
             assert!(grid.iter().map(|row| layout.width(row)).max().unwrap() <= 76);
             for (heading, _) in GROUPS {
                 let row = grid.iter().position(|row| row.contains(heading)).unwrap();
@@ -1429,7 +1446,7 @@ mod tests {
             cfg.triggers.max_load_avg_ratio = 1.2345678901234566E-100;
             let raw = cfg.triggers.max_load_avg_ratio.to_string();
             for width in [38, 64, 80, 200] {
-                let rows = layout.settings_grid(&cfg, None, width);
+                let rows = layout.settings_grid(&cfg, None, width, None);
                 assert!(rows.iter().all(|row| layout.width(row) <= width));
                 // Left lane may have unrelated rows beside the wrapped value.
                 let text = rows

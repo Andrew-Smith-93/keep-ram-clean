@@ -28,8 +28,7 @@ into the same directory. Run as your normal user:
 )
 ```
 
-In Settings, press `e`, select a field with `j`/`k`, and press Enter to see
-presets. Press `m` for manual entry, or `q` to exit. Saving in this trial only
+In Settings, select a field with `j`/`k` and press Enter to see presets. Press `m` for manual entry, or `q` to exit. Saving in this trial only
 edits the temporary file; there is no installation or daemon reload. You can
 delete the temporary directory after the trial.
 
@@ -175,19 +174,20 @@ For example, it suggests 192 MiB at 4 GiB and 704 MiB at 16 GiB. It does not
 change other triggers or enable any cleanup actions. If RAM size cannot be
 determined, no preset is suggested.
 
-`F` marks values supplied by the file and `B` marks built-in fallbacks.
-Explicit file values remain in effect for this Watch; a preview never replaces
-them. To edit an existing configuration you own, press `e` and select a row
-with `j`/`k`. Enter opens **Presets** by default: choose a common value or
-**Off/On** with `j`/`k` and press Enter to stage it (`P`). **Available floor**
+A filled dot marks a **Saved** value from the file. An open dot marks a
+**Built-in default** used when no value was saved. A **Recommended preset**
+is only a suggestion; it never replaces either until you choose and save it.
+To edit an existing configuration you own, select a row with `j`/`k` and
+press Enter to open **Presets**. Choose a common value or **Off/On** with
+`j`/`k` and press Enter to stage it. **Available floor**
 also lists the system recommendation. For an exact value, press `m` to switch
-to **Manual**, type the value, and press Enter to stage it (`M`). Esc or `p`
+to **Manual**, type the value, and press Enter to stage it. Esc or `p`
 returns from Manual to Presets without staging that input. Neither choice
 writes anything until review and save. Use `w` to review the exact file, the
 original/proposed values, and their sources. Visit each change with `j`, then
 press Enter to save the batch. After saving, the file holds an explicit value;
 the tool does not recalculate saved values as hardware changes. Without an
-editable file, Settings only shows the preview. You can explicitly create a
+editable file, Enter explains why editing is blocked or how to set up a file. You can explicitly create a
 configuration with `keep-ram-clean init-config -o PATH` and open Watch with
 `keep-ram-clean --config PATH status --watch --view config`.
 Esc cancels the current step; discarding the draft or quitting never saves.
