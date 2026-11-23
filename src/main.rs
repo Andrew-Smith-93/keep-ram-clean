@@ -11,7 +11,7 @@ mod ui;
 mod watch_layout;
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -126,9 +126,12 @@ enum Commands {
         /// Number of top memory processes to display
         #[arg(long, default_value_t = 5)]
         top: usize,
-        /// Interactive live-refreshing dashboard mode (hotkeys: c, +/-, n, r, q)
+        /// Interactive live-refreshing dashboard mode (s for read-only Settings)
         #[arg(short, long)]
         watch: bool,
+        /// Start Watch in the dashboard or read-only settings
+        #[arg(long, value_enum, requires = "watch", conflicts_with = "json")]
+        view: Option<WatchView>,
         /// Refresh interval in seconds for --watch mode
         #[arg(long, default_value_t = 2)]
         interval: u64,
@@ -420,7 +423,7 @@ fn render_status_dashboard(
         fmt_mib(mem.dirty_mb)
     ));
 
-    if !snap.swaps.is_empty() {
+    if !watch_mode && !snap.swaps.is_empty() {
         let dev_summary: Vec<String> = snap
             .swaps
             .iter()
@@ -521,6 +524,10 @@ fn render_status_dashboard(
         print_panel("PRESSURE & TOP CONSUMERS", "", "", &right_lines, w, p);
     }
 
+    if let Some(layout) = &layout {
+        layout.print(layout.swap_devices(&snap.swaps, w));
+    }
+
     // Bottom panel shares the same activity fields and history limit as before.
     let auto_lines = status_activity_lines(cfg, p, daemon_state.as_ref(), terminal_value);
 
@@ -548,7 +555,7 @@ fn render_status_dashboard(
     }
     if watch_mode {
         let controls = format!(
-            "  {}[c]{} Clean now   {}[+/-]{} RAM trigger ({:.0}%)   {}[n]{} Alerts   {}[r]{} Reload   {}[q]{} Quit   {}({}s refresh){}",
+            "  {}[c]{} Clean now   {}[+/-]{} RAM trigger ({:.0}%)   {}[n]{} Alerts   {}[r]{} Reload   {}[q]{} Quit   [s] Settings (read only)   {}({}s refresh){}",
             p.bold,
             p.nc,
             p.bold,
@@ -681,12 +688,42 @@ fn status_activity_lines(
     auto_lines
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum WatchView {
+    Dashboard,
+    Config,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatchInput {
+    Quit,
+    View(WatchView),
+    DashboardKey(u8),
+    Ignore,
+}
+
+fn watch_input(view: WatchView, key: u8) -> WatchInput {
+    match (view, key) {
+        (_, b'q' | b'Q' | 3) => WatchInput::Quit,
+        (WatchView::Dashboard, b's' | b'S') => WatchInput::View(WatchView::Config),
+        (WatchView::Config, b's' | b'S' | 27) => WatchInput::View(WatchView::Dashboard),
+        (WatchView::Config, _) => WatchInput::Ignore,
+        (_, key) => WatchInput::DashboardKey(key),
+    }
+}
+
+fn render_watch_settings(cfg: &Config, p: &Palette) {
+    let layout = watch_layout::Layout::new(p);
+    layout.print(layout.settings(cfg, ui::watch_terminal_width(), std::io::stdin().is_terminal() && std::io::stdout().is_terminal()));
+}
+
 fn cmd_status(
     cfg_path: Option<PathBuf>,
     as_json: bool,
     top: usize,
     watch: bool,
     interval: u64,
+    start_view: Option<WatchView>,
 ) -> i32 {
     let p = Palette::detect();
     let mut cfg = match load_config(cfg_path.as_deref()) {
@@ -752,6 +789,14 @@ fn cmd_status(
         return 0;
     }
 
+    let mut view = start_view.unwrap_or(WatchView::Dashboard);
+    if view == WatchView::Config
+        && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
+    {
+        render_watch_settings(&cfg, &p);
+        return 0;
+    }
+
     let sleep_secs = interval.max(1);
     WATCH_STOP.store(false, Ordering::SeqCst);
     unsafe {
@@ -779,24 +824,31 @@ fn cmd_status(
                 print!("\x1b[H\x1b[J");
             }
         }
-        render_status_dashboard(
-            &cfg,
-            top,
-            &p,
-            toast.as_ref().map(|(m, _)| m.as_str()),
-            true,
-            sleep_secs,
-        );
+        if view == WatchView::Config {
+            render_watch_settings(&cfg, &p);
+        } else {
+            render_status_dashboard(
+                &cfg, top, &p, toast.as_ref().map(|(m, _)| m.as_str()), true, sleep_secs,
+            );
+        }
         let _ = std::io::stdout().flush();
 
         let deadline = Instant::now() + Duration::from_secs(sleep_secs);
         while Instant::now() < deadline && !WATCH_STOP.load(Ordering::SeqCst) {
             if let Some(key) = term.poll_key(100) {
-                let msg = match key {
-                    b'q' | b'Q' | 3 => {
+                let key = match watch_input(view, key) {
+                    WatchInput::Quit => {
                         WATCH_STOP.store(true, Ordering::SeqCst);
                         break;
                     }
+                    WatchInput::View(next) => {
+                        view = next;
+                        break;
+                    }
+                    WatchInput::Ignore => continue,
+                    WatchInput::DashboardKey(key) => key,
+                };
+                let msg = match key {
                     b'c' | b'C' => match signal_daemon(libc::SIGUSR1, "SIGUSR1", None) {
                         Ok(m) => Some(format!("⚡ {m}")),
                         Err(e) => Some(format!("✖ {e}")),
@@ -1063,7 +1115,8 @@ fn main() -> ExitCode {
             top,
             watch,
             interval,
-        } => cmd_status(cli.config, json, top, watch, interval),
+            view,
+        } => cmd_status(cli.config, json, top, watch, interval, view),
         Commands::Config { action } => cmd_config(cli.config, action),
         Commands::Doctor { json } => cmd_doctor(cli.config, json),
         Commands::InitConfig { output, force } => cmd_init_config(output, force),

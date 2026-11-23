@@ -254,6 +254,201 @@ impl<'a> Layout<'a> {
             .collect()
     }
 
+    pub(crate) fn swap_devices(
+        &self,
+        devices: &[crate::metrics::SwapDevice],
+        width: usize,
+    ) -> Vec<String> {
+        if devices.is_empty() {
+            return Vec::new();
+        }
+        let mut rows = Vec::new();
+        let kind = |device: &crate::metrics::SwapDevice| {
+            let kernel_type = escape_controls(&device.swap_type);
+            if device.is_zram() {
+                format!("{kernel_type} / zram")
+            } else {
+                kernel_type
+            }
+        };
+        if width >= 60 {
+            let body_width = width - 4;
+            let widths = [body_width - 45, 16, 10, 10];
+            let table_row = |cells: [&str; 4]| {
+                let columns: Vec<_> = cells
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| {
+                        let mut body = self.body(text, widths[i]);
+                        if i >= 2 {
+                            for line in &mut body {
+                                let text = line.trim_end();
+                                *line =
+                                    format!("{}{text}", " ".repeat(widths[i] - self.width(text)));
+                            }
+                        }
+                        body
+                    })
+                    .collect();
+                let height = columns.iter().map(Vec::len).max().unwrap_or(1);
+                (0..height)
+                    .map(|line| {
+                        columns
+                            .iter()
+                            .enumerate()
+                            .map(|(i, parts)| {
+                                parts
+                                    .get(line)
+                                    .cloned()
+                                    .unwrap_or_else(|| " ".repeat(widths[i]))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" │ ")
+                    })
+                    .collect::<Vec<_>>()
+            };
+            rows.extend(table_row(["DEVICE / PATH", "TYPE", "USED", "SIZE"]));
+            rows.push(widths.map(|width| "─".repeat(width)).join("─┼─"));
+            for device in devices {
+                let path = escape_controls(&device.path);
+                let kind = kind(device);
+                let used = crate::ui::fmt_mib(device.used_mb);
+                let size = crate::ui::fmt_mib(device.size_mb);
+                rows.extend(table_row([&path, &kind, &used, &size]));
+            }
+        } else {
+            for (index, device) in devices.iter().enumerate() {
+                if index != 0 {
+                    rows.push(String::new());
+                }
+                rows.push(format!("Device: {}", escape_controls(&device.path)));
+                rows.push(format!("Type: {}", kind(device)));
+                rows.push(format!(
+                    "Used: {}  Size: {}",
+                    crate::ui::fmt_mib(device.used_mb),
+                    crate::ui::fmt_mib(device.size_mb)
+                ));
+            }
+        }
+        self.panel(
+            &Panel {
+                title: "SWAP DEVICES",
+                badge: "",
+                badge_col: self.p.dim,
+                lines: &rows,
+            },
+            width,
+        )
+    }
+
+    pub(crate) fn settings(
+        &self,
+        cfg: &crate::Config,
+        width: usize,
+        interactive: bool,
+    ) -> Vec<String> {
+        use crate::ui::fmt_mib;
+        let p = self.p;
+        let source = cfg.source_path.as_ref().map_or_else(
+            || "built-in defaults".into(),
+            |path| escape_controls(&path.display().to_string()),
+        );
+        let t = &cfg.triggers;
+        let n = &cfg.notifications;
+        let enabled = |on| if on { "on" } else { "off" };
+        let threshold = |v: f64| {
+            if v > 0.0 {
+                format!("{v}%")
+            } else {
+                "off".into()
+            }
+        };
+        let amount = |v| if v > 0 { fmt_mib(v) } else { "off".into() };
+        let heading = |text| format!("{}{text}{}", p.bold, p.nc);
+        let schedules = if t.schedules.is_empty() {
+            "none".into()
+        } else {
+            escape_controls(&t.schedules.join(", "))
+        };
+        let mut lines = vec![
+            format!("Source: {source}"),
+            "Values used by this Watch, not the daemon's loaded settings.".into(),
+            String::new(),
+            heading("WHEN TO ACT"),
+            format!(
+                "RAM used: {}  |  Available floor: {}",
+                threshold(t.ram_used_percent),
+                amount(t.min_available_mb)
+            ),
+            format!(
+                "Swap used: {} or {}  |  Tmpfs used: {}",
+                threshold(t.swap_used_percent),
+                amount(t.swap_used_mb),
+                threshold(t.tmpfs_used_percent)
+            ),
+            format!(
+                "Memory PSI avg10: some {}  |  full {}",
+                threshold(t.psi_some_avg10),
+                threshold(t.psi_full_avg10)
+            ),
+            format!(
+                "Poll: {}s  |  Cooldown: {}s  |  Rearm: {} pp  |  Interval: {}",
+                t.poll_interval_seconds,
+                t.cooldown_seconds,
+                t.hysteresis_percent,
+                if t.interval_minutes == 0 {
+                    "off".into()
+                } else {
+                    format!("{}m", t.interval_minutes)
+                }
+            ),
+            format!("Schedules: {schedules}"),
+            String::new(),
+            heading("WHAT TO DO"),
+            format!(
+                "Kernel: {}  |  Drop caches: level {}{}  |  Swap: {}",
+                enabled(cfg.kernel.enabled),
+                cfg.kernel.drop_caches_level,
+                if cfg.kernel.drop_caches_on_critical_only {
+                    " (critical only)"
+                } else {
+                    ""
+                },
+                enabled(cfg.swap.enabled)
+            ),
+            format!(
+                "Tmpfs: {}  |  User caches: {}  |  Process watchdog: {}",
+                enabled(cfg.tmpfs.enabled),
+                enabled(cfg.user_caches.enabled),
+                enabled(cfg.watchdog.enabled)
+            ),
+            format!(
+                "Notifications: {} (minimum {} MiB{})  |  Logging: {}",
+                enabled(n.enabled),
+                n.min_freed_mb,
+                if n.on_critical_only {
+                    ", critical only"
+                } else {
+                    ""
+                },
+                escape_controls(&cfg.logging.level)
+            ),
+        ];
+        if interactive {
+            lines.push(String::new());
+            lines.push("[s] or Esc Back to Watch  |  [q] Quit".into());
+        }
+        self.panel(
+            &Panel {
+                title: "WATCH SETTINGS",
+                badge: "READ ONLY",
+                badge_col: p.cyan,
+                lines: &lines,
+            },
+            width,
+        )
+    }
+
     pub(crate) fn text(&self, line: &str, width: usize) -> Vec<String> {
         self.body(line, width)
             .into_iter()
@@ -328,6 +523,160 @@ mod tests {
             .chars()
             .filter(|ch| !ch.is_whitespace() && *ch != '│')
             .collect()
+    }
+
+    #[test]
+    fn swap_table_aligns_columns_and_preserves_all_devices() {
+        use crate::metrics::SwapDevice;
+        let devices = [
+            SwapDevice {
+                path: "/dev/zram0".into(),
+                swap_type: "partition".into(),
+                size_mb: 4096,
+                used_mb: 127,
+                priority: 100,
+            },
+            SwapDevice {
+                path: format!(
+                    "/home/資料/{}/swapfile-SWAP-END",
+                    "verylongdirectory/".repeat(5)
+                ),
+                swap_type: "file".into(),
+                size_mb: 1024,
+                used_mb: 2,
+                priority: -2,
+            },
+        ];
+        for color in [false, true] {
+            let p = palette(color);
+            let layout = Layout::new(&p);
+            for width in [80, 120] {
+                let boxed = layout.swap_devices(&devices, width);
+                assert!(boxed.iter().all(|line| layout.width(line) == width));
+                assert!(!boxed.join("").contains('…'));
+                let table: Vec<_> = boxed
+                    .iter()
+                    .filter_map(|line| {
+                        let row = visible(&layout, line);
+                        let row = row.strip_prefix("│ ")?.strip_suffix(" │")?;
+                        let cols: Vec<_> = row.split(" │ ").map(str::to_owned).collect();
+                        (cols.len() == 4).then_some(cols)
+                    })
+                    .collect();
+                for row in &table {
+                    assert_eq!(
+                        row.iter()
+                            .map(|cell| layout.width(cell))
+                            .collect::<Vec<_>>(),
+                        [width - 49, 16, 10, 10]
+                    );
+                }
+                assert_eq!(
+                    table[0].iter().map(|col| col.trim()).collect::<Vec<_>>(),
+                    ["DEVICE / PATH", "TYPE", "USED", "SIZE"]
+                );
+                assert_eq!(
+                    table[1].iter().map(|col| col.trim()).collect::<Vec<_>>(),
+                    ["/dev/zram0", "partition / zram", "127 MiB", "4.0 GiB"]
+                );
+                assert_eq!(
+                    table[2..]
+                        .iter()
+                        .map(|row| row[0].trim())
+                        .collect::<String>(),
+                    devices[1].path
+                );
+                assert_eq!(
+                    table[2][1..]
+                        .iter()
+                        .map(|col| col.trim())
+                        .collect::<Vec<_>>(),
+                    ["file", "2 MiB", "1.0 GiB"]
+                );
+            }
+            for width in [24, 40, 59] {
+                let rows = layout.swap_devices(&devices, width);
+                let text = unpack(&layout, &rows.join(""));
+                assert!(rows.iter().all(|line| layout.width(line) == width));
+                assert!(text.contains("Device:/dev/zram0") && text.contains("Type:partition/zram"));
+                assert!(text.contains(&format!("Device:{}", devices[1].path)));
+                assert!(text.contains("Used:2MiBSize:1.0GiB"));
+                assert!(!text.contains('…'));
+            }
+            assert!(layout.swap_devices(&[], 80).is_empty());
+        }
+    }
+
+    #[test]
+    fn watch_settings_uses_parser_fixture_without_hidden_values() {
+        let mut cfg: crate::Config =
+            toml::from_str("[triggers]\nram_used_percent = 87.0\n[notifications]\nenabled=true\n")
+                .unwrap();
+        assert!(cfg.validate().is_empty());
+        cfg.source_path =
+            Some("/sample/long/source/with/nested/parts/settings-SOURCE-END.toml".into());
+        let p = palette(false);
+        let layout = Layout::new(&p);
+        for width in [32, 80, 120] {
+            let rows = layout.settings(&cfg, width, true);
+            assert!(rows.iter().all(|line| layout.width(line) == width));
+            let values = unpack(&layout, &rows.join(""));
+            for item in [
+                "READONLY",
+                "SOURCE-END.toml",
+                "RAMused:87%",
+                "Notifications:on",
+                "[s]orEscBacktoWatch",
+                "[q]Quit",
+            ] {
+                assert!(values.contains(item), "{item}: {values}");
+            }
+            assert!(!values.contains('…'));
+        }
+        assert!(!layout.settings(&cfg, 80, false).join("").contains("[q]"));
+    }
+
+    #[test]
+    fn settings_navigation_and_cli_gates_do_not_need_live_watch() {
+        use crate::{watch_input, Cli, Commands, WatchInput, WatchView};
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from(["keep-ram-clean", "status", "--watch", "--view", "config"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Status {
+                watch: true,
+                view: Some(WatchView::Config),
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["keep-ram-clean", "status", "--view", "config"]).is_err());
+        assert!(Cli::try_parse_from(["keep-ram-clean", "status", "--watch", "--json"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "keep-ram-clean",
+            "status",
+            "--watch",
+            "--json",
+            "--view",
+            "config"
+        ])
+        .is_err());
+        assert_eq!(
+            watch_input(WatchView::Dashboard, b's'),
+            WatchInput::View(WatchView::Config)
+        );
+        assert_eq!(
+            watch_input(WatchView::Config, b's'),
+            WatchInput::View(WatchView::Dashboard)
+        );
+        assert_eq!(
+            watch_input(WatchView::Config, 27),
+            WatchInput::View(WatchView::Dashboard)
+        );
+        for view in [WatchView::Dashboard, WatchView::Config] {
+            assert_eq!(watch_input(view, b'q'), WatchInput::Quit);
+        }
+        assert_eq!(watch_input(WatchView::Config, b'.'), WatchInput::Ignore);
     }
 
     #[test]

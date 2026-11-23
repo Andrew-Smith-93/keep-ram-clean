@@ -148,6 +148,12 @@ This installs `~/.local/bin/keep-ram-clean`, creates `~/.config/keep-ram-clean/c
 
 ## Usage
 
+In `status --watch`, swap devices are shown as a table, with stacked entries on
+narrow terminals. Press `s` for read-only Settings, or start there with
+`keep-ram-clean status --watch --view config`. Settings shows the file or
+built-in defaults used by this Watch process, not the daemon's active settings.
+Press `s` or Esc to return to Watch, or `q` to quit.
+
 ```bash
 # Check live RAM, PSI, swap, tmpfs, auto-clean activity, and daemon status
 keep-ram-clean status [--top N] [--watch] [--interval SECS] [--json]
