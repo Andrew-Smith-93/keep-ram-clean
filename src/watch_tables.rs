@@ -500,6 +500,27 @@ mod tests {
             toast: None,
             interval: 2,
         };
+        if std::env::var_os("KRC_TEST_WATCH_PTY").is_some() {
+            let width = crate::ui::watch_terminal_width();
+            println!("PTY-WATCH-{width}-BEGIN");
+            for line in normal.render(width, &p) {
+                println!("{line}");
+            }
+            println!("PTY-WATCH-{width}-END");
+        }
+        for width in [80, 120, 200] {
+            let rows = normal.render(width, &p);
+            let span = |left: &str, right: &str| {
+                let row = rows
+                    .iter()
+                    .find(|r| r.contains(left) && r.contains(right))
+                    .unwrap();
+                let after_left = row.split_once(left).unwrap().1;
+                after_left.split_once(right).unwrap().0.chars().count()
+            };
+            assert!(span("/dev/zram0", "partition") <= 8);
+            assert!(span(" RAM", "4.0 GiB") <= 22);
+        }
         let colored = Palette {
             color: true,
             bold: "\x1b[1m",

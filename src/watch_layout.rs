@@ -272,9 +272,36 @@ impl<'a> Layout<'a> {
                 kernel_type
             }
         };
+        let mut frame_width = width;
         if width >= 60 {
-            let body_width = width - 4;
-            let widths = [body_width - 45, 16, 10, 10];
+            let headers = ["DEVICE / PATH", "TYPE", "USED", "SIZE"];
+            let records: Vec<_> = devices
+                .iter()
+                .map(|device| {
+                    [
+                        escape_controls(&device.path),
+                        kind(device),
+                        crate::ui::fmt_mib(device.used_mb),
+                        crate::ui::fmt_mib(device.size_mb),
+                    ]
+                })
+                .collect();
+            let minimum = headers.map(|header| self.width(header));
+            let limits = [44, 20, 14, 14];
+            let mut widths = minimum;
+            for record in &records {
+                for (i, value) in record.iter().enumerate() {
+                    widths[i] = widths[i].max(self.width(value).min(limits[i]));
+                }
+            }
+            let available = width - 4 - 9;
+            while widths.iter().sum::<usize>() > available {
+                let slot = (0..widths.len())
+                    .max_by_key(|&i| widths[i] - minimum[i])
+                    .unwrap();
+                widths[slot] -= 1;
+            }
+            frame_width = 4 + 9 + widths.iter().sum::<usize>();
             let table_row = |cells: [&str; 4]| {
                 let columns: Vec<_> = cells
                     .iter()
@@ -308,14 +335,10 @@ impl<'a> Layout<'a> {
                     })
                     .collect::<Vec<_>>()
             };
-            rows.extend(table_row(["DEVICE / PATH", "TYPE", "USED", "SIZE"]));
+            rows.extend(table_row(headers));
             rows.push(widths.map(|width| "─".repeat(width)).join("─┼─"));
-            for device in devices {
-                let path = escape_controls(&device.path);
-                let kind = kind(device);
-                let used = crate::ui::fmt_mib(device.used_mb);
-                let size = crate::ui::fmt_mib(device.size_mb);
-                rows.extend(table_row([&path, &kind, &used, &size]));
+            for record in &records {
+                rows.extend(table_row(record.each_ref().map(String::as_str)));
             }
         } else {
             for (index, device) in devices.iter().enumerate() {
@@ -338,7 +361,7 @@ impl<'a> Layout<'a> {
                 badge_col: self.p.dim,
                 lines: &rows,
             },
-            width,
+            frame_width,
         )
     }
 
@@ -353,12 +376,24 @@ impl<'a> Layout<'a> {
         let rw = width - lw - 1;
         let mut l = left(lw);
         let mut r = right(rw);
+        let used_left = l
+            .iter()
+            .map(|line| self.width(line))
+            .max()
+            .unwrap_or_default();
         let n = l.len().max(r.len());
-        l.resize(n, " ".repeat(lw));
-        r.resize(n, " ".repeat(rw));
+        l.resize(n, String::new());
+        r.resize(n, String::new());
         l.into_iter()
             .zip(r)
-            .map(|(a, b)| format!("{a} {b}"))
+            .map(|(a, b)| {
+                if b.is_empty() {
+                    a
+                } else {
+                    let padding = used_left - self.width(&a) + 1;
+                    format!("{a}{}{b}", " ".repeat(padding))
+                }
+            })
             .collect()
     }
 
@@ -370,6 +405,7 @@ impl<'a> Layout<'a> {
         width: usize,
     ) -> Vec<String> {
         let inner = width - 4;
+        let mut frame_width = width;
         let gaps = 2 * (headers.len() - 1);
         let mut lines = Vec::new();
         let mut sizes = headers
@@ -394,6 +430,15 @@ impl<'a> Layout<'a> {
                         .max()
                         .unwrap_or(0)
                         .max(self.width(h))
+                        .min(match *h {
+                            "RESOURCE" => 36,
+                            "PROCESS" => 40,
+                            "FIELD" | "SETTING" | "METRIC" | "KEY" => 30,
+                            "WHEN / CHANGE" => 38,
+                            "REASON" => 70,
+                            "STEPS" => 32,
+                            _ => 52,
+                        })
                 })
                 .collect();
             if headers.len() == 2 {
@@ -411,7 +456,10 @@ impl<'a> Layout<'a> {
                 sizes[i] += 1;
                 left -= 1;
             }
-            sizes[0] += left;
+            // Leave unused terminal space outside the table; never stretch a column.
+            frame_width = (4 + gaps + sizes.iter().sum::<usize>())
+                .max(self.width(title) + 5)
+                .min(width);
             let wrapped = |row: &[String]| {
                 let cells: Vec<_> = row
                     .iter()
@@ -454,7 +502,7 @@ impl<'a> Layout<'a> {
                 badge_col: "",
                 lines: &lines,
             },
-            width,
+            frame_width,
         )
     }
 
@@ -468,7 +516,7 @@ impl<'a> Layout<'a> {
             ),
             "NO AUTO-SAVE",
             self.p.yellow,
-            width,
+            width.min(96),
         );
         lines.extend(self.table(
             "STAGED SETTINGS",
@@ -501,7 +549,7 @@ impl<'a> Layout<'a> {
             &format!("Source: {source}"),
             "READ ONLY UNTIL EDIT",
             self.p.cyan,
-            width,
+            width.min(96),
         );
         let t = &cfg.triggers;
         let n = &cfg.notifications;
@@ -717,9 +765,11 @@ mod tests {
         for color in [false, true] {
             let p = palette(color);
             let layout = Layout::new(&p);
-            for width in [80, 120] {
+            for width in [80, 120, 200] {
                 let boxed = layout.swap_devices(&devices, width);
-                assert!(boxed.iter().all(|line| layout.width(line) == width));
+                let frame = layout.width(&boxed[0]);
+                assert!(frame <= width && frame <= 87);
+                assert!(boxed.iter().all(|line| layout.width(line) == frame));
                 assert!(!boxed.join("").contains('…'));
                 let table: Vec<_> = boxed
                     .iter()
@@ -730,12 +780,17 @@ mod tests {
                         (cols.len() == 4).then_some(cols)
                     })
                     .collect();
+                let heading_widths = table[0]
+                    .iter()
+                    .map(|col| layout.width(col))
+                    .collect::<Vec<_>>();
+                assert_eq!(&heading_widths[1..], &[16, 7, 7]);
                 for row in &table {
                     assert_eq!(
                         row.iter()
                             .map(|cell| layout.width(cell))
                             .collect::<Vec<_>>(),
-                        [width - 49, 16, 10, 10]
+                        heading_widths
                     );
                 }
                 assert_eq!(
