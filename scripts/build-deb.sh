@@ -55,8 +55,8 @@ dpkg-shlibdeps -T"$STAGE/substvars" -e"$STAGE/usr/bin/$PKG_NAME"
 grep -Eq '^shlibs:Depends=.+' "$STAGE/substvars" || { echo 'Missing ELF dependencies' >&2; exit 1; }
 printf 'misc:Depends=\n' >> "$STAGE/substvars"
 dpkg-gencontrol -p"$PKG_NAME" -P"$STAGE" -T"$STAGE/substvars" \
-    -V"Installed-Size=$INSTALLED_KB" -f"$STAGE/files"
-rm "$STAGE/substvars" "$STAGE/files"
+    -V"Installed-Size=$INSTALLED_KB" -O > "$STAGE/DEBIAN/control"
+rm "$STAGE/substvars"
 
 install -m 0644 "$REPO_DIR/debian/conffiles" "$STAGE/DEBIAN/conffiles"
 for script in postinst prerm postrm; do
