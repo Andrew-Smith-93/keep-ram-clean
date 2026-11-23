@@ -16,7 +16,8 @@ pub(crate) struct Report<'a> {
 
 impl Report<'_> {
     pub(crate) fn render(&self, width: usize, p: &Palette) -> Vec<String> {
-        let width = width.min(126);
+        let frame_width = width.min(126);
+        let width = frame_width - 4;
         let layout = Layout::board(p);
         // Keep a common right-column anchor on the wide canvas.
         let left_lane = if width >= 112 { 61 } else { (width - 1) / 2 };
@@ -180,17 +181,17 @@ impl Report<'_> {
                 )
             }
         };
-        output.extend(layout.band(width, "01", "LIVE READINGS"));
+        let mut live = Vec::new();
         if width >= 96 {
-            output.extend(layout.pair_at(width, left_lane, left, pressure_table));
+            live.extend(layout.pair_at(width, left_lane, left, pressure_table));
         } else {
-            output.extend(left(width));
-            output.extend(pressure_table(width));
+            live.extend(left(width));
+            live.extend(pressure_table(width));
         }
 
         // Each band starts on one baseline. Nearby headings don't jump up or down
         // based on how many rows are in a neighbor in the previous band.
-        output.extend(layout.band(width, "02", "RESOURCE DETAILS"));
+        let mut resource_band = Vec::new();
         let storage = |w| {
             let mut out = detail_table(w);
             let swaps = layout.swap_devices(&snap.swaps, w);
@@ -201,11 +202,11 @@ impl Report<'_> {
             out
         };
         if width >= 112 {
-            output.extend(layout.pair_at(width, left_lane, storage, consumer_table));
+            resource_band.extend(layout.pair_at(width, left_lane, storage, consumer_table));
         } else {
-            output.extend(storage(width));
-            output.push(String::new());
-            output.extend(consumer_table(width));
+            resource_band.extend(storage(width));
+            resource_band.push(String::new());
+            resource_band.extend(consumer_table(width));
         }
 
         let when = if t.interval_minutes > 0 {
@@ -270,14 +271,14 @@ impl Report<'_> {
                 "Daemon not running. Start the daemon or systemd service.".into(),
             ]);
         }
-        output.extend(layout.band(width, "03", "AUTO-CLEAN"));
+        let mut automatic = Vec::new();
         let daemon = |w| layout.table("DAEMON STATE", &["FIELD", "VALUE"], &status, w);
         let policy = |w| layout.table("TRIGGERS", &["SETTING", "VALUE"], &triggers, w);
         if width >= 112 {
-            output.extend(layout.pair_at(width, left_lane, daemon, policy));
+            automatic.extend(layout.pair_at(width, left_lane, daemon, policy));
         } else {
-            output.extend(daemon(width));
-            output.extend(policy(width));
+            automatic.extend(daemon(width));
+            automatic.extend(policy(width));
         }
         if let Some(d) = active {
             let recent: Vec<_> = if d.recent_cleanups.is_empty() {
@@ -286,7 +287,7 @@ impl Report<'_> {
                 d.recent_cleanups.iter().take(3).collect()
             };
             if recent.is_empty() {
-                output.extend(layout.table(
+                automatic.extend(layout.table(
                     "RECENT CLEANUPS",
                     &["FIELD", "VALUE"],
                     &[vec![
@@ -325,7 +326,7 @@ impl Report<'_> {
                         ]
                     })
                     .collect::<Vec<_>>();
-                output.extend(layout.table(
+                automatic.extend(layout.table(
                     "RECENT CLEANUPS",
                     &["WHEN / CHANGE", "REASON", "STEPS"],
                     &rows,
@@ -333,10 +334,18 @@ impl Report<'_> {
                 ));
             }
         }
+        output.extend(layout.board_groups(
+            frame_width,
+            [
+                ("01  LIVE READINGS", live),
+                ("02  RESOURCE DETAILS", resource_band),
+                ("03  AUTO-CLEAN", automatic),
+            ],
+        ));
         if let Some(msg) = self.toast {
-            output.extend(layout.text(&escape_controls(msg), width));
+            output.extend(layout.text(&escape_controls(msg), frame_width));
         }
-        output.extend(layout.text(&format!("[c] Clean now  [+/-] RAM ({:.0}%)  [n] Alerts  [r] Reload  [s] Settings  [q] Quit  {}s refresh", t.ram_used_percent, self.interval), width));
+        output.extend(layout.text(&format!("[c] Clean now  [+/-] RAM ({:.0}%)  [n] Alerts  [r] Reload  [s] Settings  [q] Quit  {}s refresh", t.ram_used_percent, self.interval), frame_width));
         output
     }
 }

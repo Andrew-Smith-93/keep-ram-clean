@@ -49,24 +49,51 @@ impl<'a> Layout<'a> {
         layout
     }
 
-    pub(crate) fn band(&self, width: usize, number: &str, title: &str) -> Vec<String> {
+    /// One full border per operational section. Equal outer edges, without
+    /// stretching any of the content-sized tables inside.
+    pub(crate) fn board_groups(
+        &self,
+        width: usize,
+        groups: [(&str, Vec<String>); 3],
+    ) -> Vec<String> {
         let p = self.p;
-        let label = format!("{number}  {title}");
-        let rule = width.min(108).saturating_sub(self.width(&label) + 2);
-        let text = if rule > 0 {
-            format!(
-                "{}{}{label}{}  {}{}{}",
-                p.bold,
-                p.cyan,
-                p.nc,
-                p.dim,
-                "─".repeat(rule),
-                p.nc
-            )
-        } else {
-            format!("{}{}{label}{}", p.bold, p.cyan, p.nc)
+        let content = groups
+            .iter()
+            .flat_map(|(_, rows)| rows)
+            .map(|row| self.width(row))
+            .max()
+            .unwrap_or_default();
+        let headings = groups
+            .iter()
+            .map(|(title, _)| self.width(title) + 1)
+            .max()
+            .unwrap_or_default();
+        let area = (width - 4).min(content.max(headings).max(1));
+        let inner = area + 2;
+        let line = |row: &str| {
+            let pad = " ".repeat(area.saturating_sub(self.width(row)));
+            format!("{}│{} {row}{pad} {}│{}", p.cyan, p.nc, p.cyan, p.nc)
         };
-        self.text(&text, width)
+        let mut output = Vec::new();
+        for (title, rows) in groups {
+            if self.width(title) < area {
+                let fill = "─".repeat(inner - self.width(title) - 3);
+                output.push(format!(
+                    "{}╭─ {}{title}{} {}{fill}╮{}",
+                    p.cyan, p.bold, p.nc, p.cyan, p.nc
+                ));
+            } else {
+                output.push(format!("{}╭{}╮{}", p.cyan, "─".repeat(inner), p.nc));
+                output.extend(
+                    self.text(&format!("{}{title}{}", p.bold, p.nc), area)
+                        .iter()
+                        .map(|row| line(row)),
+                );
+            }
+            output.extend(rows.iter().map(|row| line(row)));
+            output.push(format!("{}╰{}╯{}", p.cyan, "─".repeat(inner), p.nc));
+        }
+        output
     }
 
     fn table_surface(&self, panel: &Panel<'_>, width: usize) -> Vec<String> {
@@ -796,6 +823,51 @@ mod tests {
             .chars()
             .filter(|ch| !ch.is_whitespace() && *ch != '│')
             .collect()
+    }
+
+    #[test]
+    fn board_groups_have_matching_edges_and_preserve_wrapped_text() {
+        for color in [false, true] {
+            let p = palette(color);
+            let layout = Layout::board(&p);
+            for width in [10, 24, 36, 80, 120, 200] {
+                let content = "縦/this-is-a-long-path/end-marker";
+                let groups = [
+                    ("01  LIVE READINGS", layout.text(content, width - 4)),
+                    (
+                        "02  RESOURCE DETAILS",
+                        layout.text("Pressure / load", width - 4),
+                    ),
+                    ("03  AUTO-CLEAN", layout.text("Status: normal", width - 4)),
+                ];
+                let rows = layout.board_groups(width, groups);
+                let clean = rows.iter().map(|s| visible(&layout, s)).collect::<Vec<_>>();
+                let edge = layout.width(&rows[0]);
+                assert!(edge <= width);
+                assert!(rows.iter().all(|row| layout.width(row) == edge));
+                assert_eq!(
+                    clean
+                        .iter()
+                        .filter(|r| r.starts_with('╭') && r.ends_with('╮'))
+                        .count(),
+                    3
+                );
+                assert_eq!(
+                    clean
+                        .iter()
+                        .filter(|r| r.starts_with('╰') && r.ends_with('╯'))
+                        .count(),
+                    3
+                );
+                let body = clean
+                    .iter()
+                    .filter_map(|r| r.strip_prefix('│'))
+                    .map(|r| r.strip_suffix('│').unwrap().trim())
+                    .collect::<String>();
+                assert!(body.contains(content));
+                assert!(!body.contains('…'));
+            }
+        }
     }
 
     #[test]
