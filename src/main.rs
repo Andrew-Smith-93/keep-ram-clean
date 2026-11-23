@@ -500,6 +500,9 @@ fn render_status_dashboard(
     }
 
     // --- Bottom Full-Width Panel: AUTO-CLEAN VISUALS & TRIGGERS ---
+    // This full-width panel pads by character count. The lightning emoji
+    // occupies two terminal cells and makes full rows wrap on some terminals.
+    const ACTIVITY_MARKER: &str = "*";
     let mut auto_lines: Vec<String> = Vec::new();
     let notif_pill = if cfg.notifications.enabled {
         format!("{}ON{}", p.green, p.nc)
@@ -532,7 +535,7 @@ fn render_status_dashboard(
         if ds.cleaning_now {
             let why = ds.cleaning_reason.as_deref().unwrap_or("Trigger fired");
             auto_lines.push(format!(
-                "{}{}⚡ AUTO-CLEAN IN PROGRESS — {why}{}",
+                "{}{}{ACTIVITY_MARKER} AUTO-CLEAN IN PROGRESS — {why}{}",
                 p.bold, p.yellow, p.nc
             ));
         } else {
@@ -577,7 +580,7 @@ fn render_status_dashboard(
                     .collect::<Vec<_>>()
                     .join(" ");
                 auto_lines.push(format!(
-                    "{}⚡ {}{}  {}{:+} MiB RAM{}  {}{:+} MiB swap{}  ({:.2}s)  {}  [{}]",
+                    "{}{ACTIVITY_MARKER} {}{}  {}{:+} MiB RAM{}  {}{:+} MiB swap{}  ({:.2}s)  {}  [{}]",
                     p.cyan,
                     fmt_hms(ev.finished_at),
                     p.nc,
@@ -601,7 +604,7 @@ fn render_status_dashboard(
     }
 
     let (act_badge, act_col) = if cleaning_now {
-        ("⚡ CLEANING", p.yellow)
+        ("CLEANING", p.yellow)
     } else {
         ("STANDBY", p.dim)
     };
