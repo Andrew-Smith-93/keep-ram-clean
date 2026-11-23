@@ -1,3 +1,10 @@
+keep-ram-clean (2.3.0-1) UNRELEASED; urgency=medium
+
+  * Add standalone, opt-in memory pressure discovery for same-user workloads.
+  * Keep existing services unchanged; report by default and require explicit SIGTERM opt-in.
+
+ -- Andrew Smith <andrewsmith.independent@gmail.com>  Mon, 23 Nov 2026 06:35:00 +0000
+
 keep-ram-clean (2.2.1-1) UNRELEASED; urgency=medium
 
   * Derive convenience package dependencies from the staged ELF.

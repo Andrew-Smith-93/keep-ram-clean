@@ -2,6 +2,11 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.3.0] - 2026-11-23
+
+### Added
+- Standalone `pressure-watch` command to discover exact allowlisted, user-owned workloads or watch explicitly registered PIDs under sustained memory pressure. It reports by default. Explicit `--terminate` allows SIGTERM only, guarded by process identity and cooldown; existing services are unchanged.
+
 ## [2.2.1] - 2026-11-23
 
 ### Fixed

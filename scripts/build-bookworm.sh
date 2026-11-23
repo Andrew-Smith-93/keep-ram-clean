@@ -23,9 +23,13 @@ docker run --rm --platform linux/amd64 --network=none --cap-drop=ALL \
     --tmpfs /tmp:rw,exec,mode=1777 --workdir /src \
     -v "$work/src:/src:ro" -v "$work/vendor:/vendor:ro" -v "$work/out:/out" \
     -e HOME=/tmp -e CARGO_HOME=/tmp/cargo -e CARGO_TARGET_DIR=/tmp/target \
+    -e "KRC_RUN_SCOPED_PIDFD_SMOKE=${KRC_RUN_SCOPED_PIDFD_SMOKE:-0}" \
     -e CARGO_NET_OFFLINE=true -e "KRC_BUILD_REVISION=$rev" -e "KRC_BUILD_IMAGE=$image" \
     "$image" bash -euc 'source /etc/os-release; test "$ID/$VERSION_CODENAME" = debian/bookworm
       cargo test --locked
+      if [ "$KRC_RUN_SCOPED_PIDFD_SMOKE" = 1 ]; then
+        cargo test --locked pressure_relief::tests::isolated_pidfd_discovery_preview_and_term -- --ignored --exact
+      fi
       scripts/build-deb.sh /out
       KRC_MAX_GLIBC=2.36 scripts/verify-deb.sh /out/*.deb
       extracted="$(mktemp -d)"

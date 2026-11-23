@@ -269,6 +269,7 @@ fn discover_best(
     uid: u32,
     allowed: &[AllowedExe],
     excluded: &HashSet<u32>,
+    min_rss: u64,
 ) -> io::Result<Option<(u32, Sample)>> {
     Ok(fs::read_dir(procfs)?
         .filter_map(|entry| {
@@ -283,7 +284,7 @@ fn discover_best(
                 return None;
             }
             let s = sample(procfs, pid, uid, allowed)?;
-            (s.rss >= MIN_RSS_KIB).then_some((pid, s))
+            (s.rss >= min_rss).then_some((pid, s))
         })
         .max_by_key(|(pid, s)| rank(s, *pid)))
 }
@@ -309,6 +310,37 @@ fn act(
     }
     sink()?;
     Ok(Action::TermSent)
+}
+
+impl Workload {
+    fn dispatch(
+        &mut self,
+        procfs: &Path,
+        uid: u32,
+        allowed: &[AllowedExe],
+        pressure: Option<bool>,
+        terminate: bool,
+        min_rss: u64,
+    ) -> io::Result<Action> {
+        if self.attempted {
+            return Ok(Action::Refused);
+        }
+        let ready = pressure == Some(true)
+            && ancestors(procfs, std::process::id())
+                .is_some_and(|chain| !chain.contains(&self.pid))
+            && fd_matches(procfs, &self.fd, self.pid);
+        let current = sample(procfs, self.pid, uid, allowed).filter(|a| ready && a.rss >= min_rss);
+        let signal = || pidfd_send_signal(self.fd.as_raw_fd(), libc::SIGTERM);
+        if terminate {
+            self.attempted = true;
+        }
+        act(
+            &self.identity,
+            current.as_ref().map(|s| &s.identity),
+            terminate,
+            signal,
+        )
+    }
 }
 
 fn validate_args(pids: &[u32], paths: &[PathBuf], discover: bool) -> Result<(), &'static str> {
@@ -413,8 +445,9 @@ pub fn watch(
                 if last_scan.is_none_or(|prev| now.saturating_sub(prev) >= Duration::from_secs(10))
                 {
                     last_scan = Some(now);
-                    if let Some((pid, observed)) = discover_best(procfs, uid, &allowed, &protected)
-                        .map_err(|e| format!("unable to scan procfs safely: {e}"))?
+                    if let Some((pid, observed)) =
+                        discover_best(procfs, uid, &allowed, &protected, MIN_RSS_KIB)
+                            .map_err(|e| format!("unable to scan procfs safely: {e}"))?
                     {
                         if let Some(w) = register(procfs, pid, uid, &allowed)
                             .filter(|w| w.identity == observed.identity)
@@ -436,16 +469,7 @@ pub fn watch(
                 .max_by_key(|(w, s)| rank(s, w.pid));
             if let Some((w, s)) = candidate {
                 gate.attempted = Some(clock.elapsed());
-                let ready = memory() == Some(true)
-                    && ancestors(procfs, self_pid).is_some_and(|chain| !chain.contains(&w.pid))
-                    && fd_matches(procfs, &w.fd, w.pid);
-                let current =
-                    sample(procfs, w.pid, uid, &allowed).filter(|a| ready && a.rss >= MIN_RSS_KIB);
-                let signal = || pidfd_send_signal(w.fd.as_raw_fd(), libc::SIGTERM);
-                if terminate {
-                    w.attempted = true;
-                }
-                match act(&w.identity, current.as_ref().map(|s| &s.identity), terminate, signal) {
+                match w.dispatch(procfs, uid, &allowed, memory(), terminate, MIN_RSS_KIB) {
                     Ok(Action::Preview) => eprintln!("[pressure] would SIGTERM PID {} ({:?}, RSS {} MiB, OOM score {}); no signal sent", w.pid, s.identity.exe, s.rss / 1024, s.score),
                     Ok(Action::TermSent) => eprintln!("[pressure] sent SIGTERM to PID {} ({:?}, RSS {} MiB, OOM score {})", w.pid, s.identity.exe, s.rss / 1024, s.score),
                     Ok(Action::Refused) => eprintln!("[pressure] PID {} no longer qualifies; no signal sent", w.pid),
@@ -547,6 +571,69 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "real pidfd/SIGTERM integration: only in an isolated disposable PID namespace"]
+    fn isolated_pidfd_discovery_preview_and_term() {
+        use std::{os::unix::process::ExitStatusExt, process::Command};
+        assert_eq!(
+            std::env::var("KRC_RUN_SCOPED_PIDFD_SMOKE").as_deref(),
+            Ok("1")
+        );
+        let uid = unsafe { libc::getuid() };
+        assert!(uid >= 1000);
+        let procfs = Path::new("/proc");
+        let status = fs::read_to_string(procfs.join("self/status")).unwrap();
+        assert!(regular_user(&status, uid).is_some());
+        let root =
+            std::env::temp_dir().join(format!("krc-real-pidfd-smoke-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let fixture = Fixture(root);
+        let exe = fixture.0.join("scoped-worker");
+        let other_exe = fixture.0.join("unlisted-worker");
+        fs::copy("/bin/sleep", &exe).unwrap();
+        fs::copy("/bin/sleep", &other_exe).unwrap();
+        let mut child = Command::new(&exe).arg("6").spawn().unwrap();
+        let mut other = Command::new(&other_exe).arg("6").spawn().unwrap();
+        let allowed = [AllowedExe::open(&exe, uid).unwrap()];
+        let excluded = ancestors(procfs, std::process::id()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (pid, observed) = loop {
+            if let Some(found) = discover_best(procfs, uid, &allowed, &excluded, 1).unwrap() {
+                break found;
+            }
+            assert!(Instant::now() < deadline, "own executable not discoverable");
+            thread::sleep(Duration::from_millis(25));
+        };
+        // No process outside this harness can receive a signal, even on a failing test.
+        assert_eq!(pid, child.id());
+        let mut target = register(procfs, pid, uid, &allowed).unwrap();
+        assert_eq!(target.identity, observed.identity);
+        let pressure = pressured(&mem(1, 1000, 1)); // Inject telemetry, not actual memory pressure.
+        assert_eq!(
+            target
+                .dispatch(procfs, uid, &allowed, pressure, false, 1)
+                .unwrap(),
+            Action::Preview
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(other.try_wait().unwrap().is_none());
+        assert_eq!(
+            target
+                .dispatch(procfs, uid, &allowed, pressure, true, 1)
+                .unwrap(),
+            Action::TermSent
+        );
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(other.try_wait().unwrap().is_none());
+        assert_eq!(
+            target
+                .dispatch(procfs, uid, &allowed, pressure, true, 1)
+                .unwrap(),
+            Action::Refused
+        );
+        assert!(other.wait().unwrap().success());
+    }
+
+    #[test]
     fn synthetic_discovery_uses_exact_file_and_uid_then_ranks_eligible() {
         let uid = unsafe { libc::getuid() };
         if uid < 1000 {
@@ -581,7 +668,8 @@ mod tests {
         add(1003, uid, 100, &other_path); // A matching comm name alone is not enough.
         add(1004, uid + 1, 110, &allowed_path);
         let allow = [AllowedExe::open(&allowed_path, uid).unwrap()];
-        let get = |skip: &HashSet<u32>| discover_best(root, uid, &allow, skip).unwrap();
+        let get =
+            |skip: &HashSet<u32>| discover_best(root, uid, &allow, skip, MIN_RSS_KIB).unwrap();
         let (pid, observed) = get(&HashSet::new()).unwrap();
         assert_eq!(pid, 1002);
         assert_eq!(get(&HashSet::from([1002])).unwrap().0, 1001);
