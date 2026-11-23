@@ -154,6 +154,8 @@ This installs `~/.local/bin/keep-ram-clean`, creates `~/.config/keep-ram-clean/c
 
 ## Usage
 
+See the [Watch and daemon glossary](#watch-and-daemon-glossary) for the labels in Watch and Settings.
+
 In `status --watch`, memory, swap devices, pressure, consumers, and cleanup
 activity are shown in tables that stack when columns are too narrow. In a short
 interactive terminal, use `j`/`k` when the scroll footer appears.
@@ -227,6 +229,55 @@ keep-ram-clean init-config [-o PATH] [-f]
 ```
 
 `-c` / `--config PATH` is accepted both before and after subcommands (`run`, `daemon`, `status`, `doctor`).
+
+---
+
+## Watch and daemon glossary
+
+### Memory and pressure
+
+| Label | Meaning |
+| --- | --- |
+| **RAM, Available, Used** | RAM is physical working memory. Linux's `MemAvailable` estimates what new apps can use without swapping, including some reclaimable memory. **Free** counts only currently unused RAM. Watch shows **Used** as total minus available, not total minus free. |
+| **Cache, Reclaimable slab, Dirty** | Cache holds file data for faster access. Reclaimable slab is kernel bookkeeping that Linux may be able to reclaim. Dirty memory contains changes not yet written back. These are separate indicators, not amounts to add to Available. |
+| **Swap, PRIO** | Swap gives Linux somewhere to move memory pages out of their normal RAM allocation. A swap entry can be a file, partition, or compressed RAM device. PRIO is the entry's priority; higher priorities are preferred. Swap usage by itself does not mean the machine is stalled now. |
+| **zram, zswap** | zram is a compressed block device in RAM that can be used as swap. zswap is a compressed RAM cache in front of backing swap. They're different: zram can be a swap device; zswap isn't a separate device. |
+| **tmpfs** | A memory-backed filesystem (a temporary file store). It grows as files are added, up to the mount's limit, and may use swap. The percentage is usage of that mount, not a percentage of all RAM. |
+| **PSI** | Pressure Stall Information measures time tasks are held up waiting for a resource. For memory PSI, **some** means at least one task was stalled; **full** means all non-idle tasks were stalled at once. These are time percentages, not RAM usage or percentages of processes. |
+| **avg10 / avg60 / avg300** | Linux's PSI averages over 10, 60, and 300 seconds, respectively. Watch's `10/60s` row shows the first two; the daemon's PSI thresholds use `avg10`. These windows aren't the Watch refresh or daemon polling interval. If PSI is unavailable, it isn't a zero-pressure reading. |
+| **PID, RSS, Load / CPUs** | PID is a process ID. RSS (Resident Set Size) is memory resident in RAM for that process; it can include shared pages, so summing rows can count shared memory more than once. Load averages (1/5/15 minutes) count runnable and uninterruptible tasks on average, not CPU utilization. Load per CPU divides the 1-minute load average by the CPU count. |
+| **MiB, GiB, pp** | 1 MiB is 1,048,576 bytes; 1 GiB is 1,024 MiB. `pp` means percentage points: 80% down to 75% is a drop of 5 pp. |
+
+Linux references: [/proc and memory counters](https://docs.kernel.org/filesystems/proc.html),
+[PSI](https://docs.kernel.org/accounting/psi.html), [zram](https://docs.kernel.org/admin-guide/blockdev/zram.html),
+[zswap](https://docs.kernel.org/admin-guide/mm/zswap.html), and [tmpfs](https://docs.kernel.org/filesystems/tmpfs.html).
+
+### Daemon and cleanup decisions
+
+- **Daemon / service / status:** The daemon is the running process that checks conditions and can carry out enabled cleanup. A systemd service manages how that process runs. Status and Watch display telemetry and the daemon's recorded activity; opening Watch is not the same as starting the daemon. A cleanup reason says why a run was requested; it doesn't tell you which actions succeeded. Check the individual step results and measured RAM/swap changes.
+- **Thresholds / Available floor:** RAM used, swap used, tmpfs used, and PSI trigger at or above their enabled limits. The Available floor triggers at or below its limit; raising it can trigger cleanup sooner. Swap can be checked by percentage or amount. A zero threshold disables that particular trigger. Watch's trigger values come from the config it reads, not a report of the daemon's in-memory settings.
+- **Poll interval / Periodic interval / Schedule:** Poll interval is how often the daemon checks for work. A periodic interval requests cleanup after a configured number of minutes; a wall-clock or cron schedule requests it at configured times. Reactive means responding to measured thresholds rather than a timer. Neither is the Watch display refresh rate.
+- **Cooldown / Re-arm margin (hysteresis):** Cooldown limits repeat reactive runs; some critical conditions use a shorter cooldown. Re-arm margin makes certain percentage triggers wait for the reading to fall below the threshold by a configured margin before they can trigger again. It reduces repeat runs while readings hover near a limit.
+- **CPU load limit / Notifications:** CPU load limit is a load-per-CPU ratio used for load-sensitive cleanup decisions, not a CPU-use percentage. Desktop notices can be filtered by a minimum amount of RAM freed or limited to runs marked critical. These settings control notices, not whether cleanup triggers.
+- **Drop caches / Drop critical-only / Cgroup reclaim / Minimum tmpfs age:** Drop caches asks the kernel to discard eligible caches: level 0 is off, 1 is page cache, 2 is reclaimable slab, and 3 is both. Drop critical-only restricts that action to runs classified as critical. Cgroup reclaim asks the kernel to reclaim memory from a Linux control group; the configured MiB is a request, not a guarantee. Minimum tmpfs age is how long a matching item must age before it can be considered for cleanup.
+- **Dry-run / report-only:** `run --dry-run` previews cleanup without applying it. The independent `pressure-watch` command reports by default; this does not change the ordinary daemon's cleanup settings.
+
+Kernel references: [drop_caches](https://docs.kernel.org/admin-guide/sysctl/vm.html#drop-caches)
+and [cgroup v2 memory.reclaim](https://docs.kernel.org/admin-guide/cgroup-v2.html).
+
+### Where Settings values come from
+
+| Label | Meaning |
+| --- | --- |
+| **Saved** | The value is explicitly set in the TOML file Watch read. A saved value doesn't prove the daemon has loaded it. |
+| **Built-in default** | The program supplies the value because it was not set in the file. It is not a hardware recommendation. |
+| **Preset / Recommended preset** | A ready-made choice. The Recommended preset for Available floor uses detected RAM capacity as a starting point. Choosing it stages a value; nothing is written until you review and save. |
+| **Manual** | A value you type instead of choosing a preset. |
+| **Staged / Preset draft / Manual draft** | A pending edit in Watch. It has not been written to the file and is not active in the daemon. |
+
+Saving in Watch writes the file but does not signal the daemon. Even if Watch
+and the daemon report the same config path, a daemon can still be using values
+from an earlier successful load. A failed reload leaves the previous values in use.
 
 ---
 
