@@ -5,7 +5,7 @@ use std::{
     fs, io,
     os::{
         fd::{AsRawFd, OwnedFd},
-        unix::fs::MetadataExt,
+        unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
     thread,
@@ -116,7 +116,12 @@ impl AllowedExe {
         if fs::canonicalize(path).ok()?.as_path() != path {
             return None;
         }
-        let file = fs::File::open(path).ok()?;
+        // Obtain metadata only; never block opening a FIFO or activate a device.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+            .open(path)
+            .ok()?;
         let pinned = file.metadata().ok()?;
         let current = fs::symlink_metadata(path).ok()?;
         (valid_exe(&pinned, uid) && same_file(&pinned, &current)).then_some(Self {
