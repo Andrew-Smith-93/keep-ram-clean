@@ -160,14 +160,32 @@ marks the selected field and `*` marks a staged change. Press `q` to quit
 Settings, or `s` or a standalone Esc to return to Watch. Arrow, Page,
 and function keys are not Settings shortcuts.
 
-To edit an existing configuration you own, press `e`, select a row with
-`j`/`k`, and press Enter. Enter stages each new value. Use `w` to review
-the exact file and original/proposed values. Visit each change with `j`, then
-press Enter to save the batch.
+Settings previews a system preset for **Available floor**. It uses Linux's
+reported physical RAM, not current load, free RAM, process data, or cgroup
+limits. The recommendation is 4% of RAM rounded up in 64 MiB steps, with a
+128 MiB minimum and the existing 1536 MiB built-in value as its ceiling.
+For example, it suggests 192 MiB at 4 GiB and 704 MiB at 16 GiB. It does not
+change other triggers or enable any cleanup actions. If RAM size cannot be
+determined, no preset is suggested.
+
+`F` marks values supplied by the file and `B` marks built-in fallbacks.
+Explicit file values remain in effect for this Watch; a preview never replaces
+them. To edit an existing configuration you own, press `e` and select a row
+with `j`/`k`. Press Enter to enter a specific value (`M`), or select
+**Available floor** and press `p` to deliberately choose the system preset
+(`P`). Both choices stage a draft only. Use `w` to review the exact file, the
+original/proposed values, and their sources. Visit each change with `j`, then
+press Enter to save the batch. After saving, the file holds an explicit value;
+the tool does not recalculate saved values as hardware changes. Without an
+editable file, Settings only shows the preview. You can explicitly create a
+configuration with `keep-ram-clean init-config -o PATH` and open Watch with
+`keep-ram-clean --config PATH status --watch --view config`.
 Esc cancels the current step; discarding the draft or quitting never saves.
 Built-in defaults, symlinks, and files you do not own are not editable here.
 Save does not signal or reload the daemon. A later reload or restart can use
-the saved values and change when and how cleanup runs.
+the saved values and change when and how cleanup runs. Choosing a higher
+available-RAM floor than your manual setting (including zero, which disables
+this trigger) can make the floor trigger sooner.
 
 ```bash
 # Check live RAM, PSI, swap, tmpfs, auto-clean activity, and daemon status

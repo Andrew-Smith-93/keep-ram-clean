@@ -700,7 +700,8 @@ fn cmd_status(
     start_view: Option<WatchView>,
 ) -> i32 {
     let p = Palette::detect();
-    let mut cfg = match load_config(cfg_path.as_deref()) {
+    let load = if watch && !as_json { config::load_watch_config } else { load_config };
+    let mut cfg = match load(cfg_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -845,7 +846,7 @@ fn cmd_status(
                 }
                 if view == WatchView::Config && key == b'e' {
                     settings_page.follow();
-                    match watch_editor::Editor::open(&cfg) {
+                    match watch_editor::Editor::open(&cfg, settings_page.preset()) {
                         Ok(opened) => { editor = Some(opened); settings_message.clear(); }
                         Err(error) => settings_message = error,
                     }
@@ -880,7 +881,7 @@ fn cmd_status(
                     },
                     b'r' | b'R' => match signal_daemon(libc::SIGHUP, "SIGHUP", None) {
                         Ok(m) => {
-                            if let Ok(reloaded) = load_config(cfg_path.as_deref()) {
+                            if let Ok(reloaded) = load(cfg_path.as_deref()) {
                                 cfg = reloaded;
                             }
                             Some(format!("✔ {m}"))

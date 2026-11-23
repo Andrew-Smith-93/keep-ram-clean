@@ -9,9 +9,16 @@ unsafe extern "C" {
 pub(crate) struct SettingsPage {
     page: usize,
     manual: bool,
+    preset: std::cell::OnceCell<Option<crate::watch_editor::SystemPreset>>,
 }
 
 impl SettingsPage {
+    pub(crate) fn preset(&self) -> Option<crate::watch_editor::SystemPreset> {
+        *self
+            .preset
+            .get_or_init(crate::watch_editor::SystemPreset::detect)
+    }
+
     pub(crate) fn step(&mut self, forward: bool) {
         self.manual = true;
         self.page = if forward {
@@ -724,18 +731,16 @@ impl<'a> Layout<'a> {
         editor: Option<&crate::watch_editor::Editor>,
         width: usize,
     ) -> Vec<String> {
-        use crate::watch_editor::{display_value, values, GROUPS, LABELS};
+        use crate::watch_editor::{display_value, source, values, GROUPS, LABELS};
         let p = self.p;
         let proposed = values(editor.map_or(cfg, |e| &e.draft.proposed));
         let shown =
             std::array::from_fn::<_, { LABELS.len() }, _>(|id| display_value(id, &proposed[id]));
-        let original = editor.map(|e| values(&e.draft.original));
         let selected = editor.and_then(crate::watch_editor::Editor::selecting);
         let label = |id: usize| {
             let focused = Some(id) == selected;
-            let changed = original
-                .as_ref()
-                .is_some_and(|previous| previous[id] != proposed[id]);
+            let origin = source(editor.map_or(cfg, |e| &e.draft.original), id, editor);
+            let changed = matches!(origin, 'M' | 'P');
             let arrow = if focused { '>' } else { ' ' };
             let star = if changed { '*' } else { ' ' };
             let color = if focused {
@@ -745,10 +750,10 @@ impl<'a> Layout<'a> {
             } else {
                 ""
             };
-            format!("{color}{arrow}{star} {}{}", LABELS[id], p.nc)
+            format!("{color}{arrow}{star} {origin} {}{}", LABELS[id], p.nc)
         };
         let sizes = |groups: &[(&str, &[usize])]| {
-            let labels = 3 + groups
+            let labels = 5 + groups
                 .iter()
                 .flat_map(|(heading, ids)| {
                     std::iter::once(self.width(heading))
@@ -777,7 +782,7 @@ impl<'a> Layout<'a> {
                 let mut rows = Vec::new();
                 for (heading, ids) in groups {
                     rows.push(aligned(
-                        &format!("   {}{heading}{}", p.bold, p.nc),
+                        &format!("     {}{heading}{}", p.bold, p.nc),
                         &format!("{}VALUE{}", p.bold, p.nc),
                     ));
                     rows.push(format!("{}─┼─{}", "─".repeat(labels), "─".repeat(values)));
@@ -943,6 +948,28 @@ impl<'a> Layout<'a> {
         );
         rows.extend(self.text(&format!("Source: {source}"), width));
         rows.extend(self.settings_grid(cfg, editor, width));
+        rows.extend(self.text(
+            "F File · B Built-in · M Manual draft · P Preset draft",
+            width,
+        ));
+        let floor_key = crate::watch_editor::FIELDS[crate::watch_editor::FLOOR].0;
+        let preset = match page.preset() {
+            Some(preset) => format!(
+                "System preset preview: {} MiB floor · {:.1} GiB RAM{}",
+                preset.floor_mib,
+                preset.ram_mib as f64 / 1024.0,
+                if editor
+                    .map_or(cfg, |e| &e.draft.original)
+                    .setting_explicit(floor_key)
+                {
+                    " · file wins"
+                } else {
+                    ""
+                }
+            ),
+            None => "System preset unavailable: RAM size unknown".into(),
+        };
+        rows.extend(self.text(&preset, width));
         let on = |v| if v { "on" } else { "off" };
         rows.extend(self.text(
             &format!(
@@ -986,7 +1013,7 @@ impl<'a> Layout<'a> {
                 Some("Editing:")
             } else {
                 rows.extend(self.text(
-                    "j/k Select  Enter Edit  w Review  Esc Discard  q Quit  * Staged",
+                    "j/k Select  Enter Manual  p Preset  w Review  Esc Discard  q Quit  * Staged",
                     width,
                 ));
                 Some(">")
@@ -1280,7 +1307,7 @@ mod tests {
             let grid = layout.settings_grid(&cfg, None, 80);
             assert_eq!(grid, layout.settings_grid(&cfg, None, 120));
             assert_eq!(grid, layout.settings_grid(&cfg, None, 200));
-            assert!(grid.iter().map(|row| layout.width(row)).max().unwrap() <= 72);
+            assert!(grid.iter().map(|row| layout.width(row)).max().unwrap() <= 76);
             for (heading, _) in GROUPS {
                 let row = grid.iter().position(|row| row.contains(heading)).unwrap();
                 assert!(grid[row].contains("VALUE") && grid[row + 1].contains('┼'));

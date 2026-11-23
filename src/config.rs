@@ -293,6 +293,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+    #[serde(skip)]
+    explicit_settings: Vec<(String, String)>,
 }
 
 fn in_finite_range(val: f64, lo: f64, hi: f64) -> bool {
@@ -558,6 +560,14 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 pub fn load_config(explicit: Option<&Path>) -> Result<Config, String> {
+    load_config_inner(explicit, false)
+}
+
+pub(crate) fn load_watch_config(explicit: Option<&Path>) -> Result<Config, String> {
+    load_config_inner(explicit, true)
+}
+
+fn load_config_inner(explicit: Option<&Path>, track_sources: bool) -> Result<Config, String> {
     let root = is_root();
     let chosen: Option<PathBuf> = if let Some(p) = explicit {
         let expanded = expand_tilde(p);
@@ -592,6 +602,9 @@ pub fn load_config(explicit: Option<&Path>) -> Result<Config, String> {
     let mut cfg: Config = toml::from_str(&text)
         .map_err(|e| format!("Failed parsing {}: {e}", path.display()))?;
     cfg.source_path = Some(path);
+    if track_sources {
+        cfg.record_explicit_settings(&text)?;
+    }
 
     let errors = cfg.validate();
     if !errors.is_empty() {
@@ -625,6 +638,30 @@ pub fn resolve_setting_alias(name: &str) -> Option<(&'static str, &'static str, 
         "cgroup-reclaim-mb" | "kernel.cgroup_reclaim_mb" => Some(("kernel", "cgroup_reclaim_mb", "int")),
         "tmpfs-age" | "tmpfs.min_age_minutes" => Some(("tmpfs", "min_age_minutes", "int")),
         _ => None,
+    }
+}
+
+impl Config {
+    fn record_explicit_settings(&mut self, text: &str) -> Result<(), String> {
+        let fields: toml::Table =
+            toml::from_str(text).map_err(|e| format!("Cannot inspect TOML setting sources: {e}"))?;
+        self.explicit_settings = fields
+            .into_iter()
+            .filter_map(|(section, value)| match value {
+                toml::Value::Table(table) => Some((section, table)),
+                _ => None,
+            })
+            .flat_map(|(section, table)| {
+                table.into_iter().map(move |(key, _)| (section.clone(), key))
+            })
+            .collect();
+        Ok(())
+    }
+
+    pub(crate) fn setting_explicit(&self, alias: &str) -> bool {
+        resolve_setting_alias(alias).is_some_and(|(section, key, _)| {
+            self.explicit_settings.iter().any(|(s, k)| s == section && k == key)
+        })
     }
 }
 
@@ -744,6 +781,7 @@ pub fn update_config_setting(
     let patched = patch_toml_key(&existing, section, key, &formatted);
     let mut cfg: Config = toml::from_str(&patched)
         .map_err(|e| format!("Updated config failed to parse: {e}"))?;
+    cfg.record_explicit_settings(&patched)?;
     let errs = cfg.validate();
     if !errs.is_empty() {
         return Err(format!("Validation failed:\n  - {}", errs.join("\n  - ")));
@@ -822,17 +860,22 @@ fn parse_watch_config(text: &str, path: &Path) -> Result<Config, String> {
         return Err(errors.join("; "));
     }
     cfg.source_path = Some(path.to_owned());
+    cfg.record_explicit_settings(text)?;
     Ok(cfg)
 }
 
 // Preserve comments, indentation, and line endings when changing existing scalar keys.
 fn patch_watch_key(text: &str, section: &str, key: &str, value: &str) -> String {
     let header = format!("[{section}]");
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut inside = false;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
+            if inside {
+                return format!("{}{key} = {value}{newline}{}", &text[..offset], &text[offset..]);
+            }
             inside = trimmed
                 .split('#')
                 .next()
@@ -852,7 +895,13 @@ fn patch_watch_key(text: &str, section: &str, key: &str, value: &str) -> String 
         }
         offset += line.len();
     }
-    patch_toml_key(text, section, key, value)
+    let separator = if text.is_empty() || text.ends_with('\n') { "" } else { newline };
+    if inside {
+        format!("{text}{separator}{key} = {value}{newline}")
+    } else {
+        let blank = if text.is_empty() { "" } else { newline };
+        format!("{text}{separator}{blank}{header}{newline}{key} = {value}{newline}")
+    }
 }
 
 impl WatchConfigDraft {
@@ -927,6 +976,12 @@ impl WatchConfigDraft {
         self.patches = draft;
         self.proposed = proposed;
         Ok(())
+    }
+
+    pub(crate) fn has_staged(&self, alias: &str) -> bool {
+        resolve_setting_alias(alias).is_some_and(|(section, key, _)| {
+            self.patches.iter().any(|(s, k, _)| *s == section && *k == key)
+        })
     }
 
     pub(crate) fn unstage(&mut self, alias: &str) -> Result<(), String> {

@@ -96,6 +96,56 @@ pub(crate) fn values(c: &Config) -> [String; FIELDS.len()] {
     ]
 }
 
+pub(crate) const FLOOR: usize = 1;
+
+#[derive(Clone, Copy)]
+pub(crate) struct SystemPreset {
+    pub(crate) ram_mib: u64,
+    pub(crate) floor_mib: u64,
+}
+
+impl SystemPreset {
+    pub(crate) fn from_ram_mib(ram_mib: u64) -> Option<Self> {
+        if ram_mib < 128 {
+            return None;
+        }
+        // Round 4% of physical RAM up to a 64 MiB boundary; never raise the
+        // trigger above the shipping default or use current memory pressure.
+        let cap = crate::config::TriggerConfig::default().min_available_mb;
+        let floor_mib = ram_mib.div_ceil(1600).min(cap.div_ceil(64)) * 64;
+        Some(Self {
+            ram_mib,
+            floor_mib: floor_mib.clamp(128, cap),
+        })
+    }
+
+    pub(crate) fn detect() -> Option<Self> {
+        #[cfg(test)]
+        if let Ok(fixture) = std::env::var("KRC_WATCH_PRESET_RAM_MIB") {
+            return Self::from_ram_mib(fixture.parse().ok()?);
+        }
+        let pages = u64::try_from(unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) }).ok()?;
+        let size = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+        Self::from_ram_mib(pages.checked_mul(size)? / (1024 * 1024))
+    }
+}
+
+pub(crate) fn source(cfg: &Config, index: usize, editor: Option<&Editor>) -> char {
+    let key = FIELDS[index].0;
+    if let Some(editor) = editor.filter(|editor| editor.draft.has_staged(key)) {
+        return if index == FLOOR && editor.preset_staged {
+            'P'
+        } else {
+            'M'
+        };
+    }
+    if cfg.setting_explicit(key) {
+        'F'
+    } else {
+        'B'
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum Mode {
     Browse,
@@ -119,10 +169,12 @@ pub(crate) struct Editor {
     review_page: usize,
     review_seen: usize,
     pub(crate) note: String,
+    preset: Option<SystemPreset>,
+    preset_staged: bool,
 }
 
 impl Editor {
-    pub(crate) fn open(cfg: &Config) -> Result<Self, String> {
+    pub(crate) fn open(cfg: &Config, preset: Option<SystemPreset>) -> Result<Self, String> {
         Ok(Self {
             draft: WatchConfigDraft::open(cfg.source_path.as_deref())?,
             selected: 0,
@@ -131,16 +183,48 @@ impl Editor {
             review_page: 0,
             review_seen: 0,
             note: String::new(),
+            preset,
+            preset_staged: false,
         })
     }
 
     fn changes(&self) -> Vec<usize> {
-        values(&self.draft.original)
+        FIELDS
             .iter()
-            .zip(values(&self.draft.proposed))
             .enumerate()
-            .filter_map(|(i, (old, new))| (old != &new).then_some(i))
+            .filter_map(|(i, (alias, _))| self.draft.has_staged(alias).then_some(i))
             .collect()
+    }
+
+    fn stage_preset(&mut self) {
+        let key = FIELDS[FLOOR].0;
+        if self.selected != FLOOR {
+            self.note = "Select Available floor to choose the system preset.".into();
+            return;
+        }
+        let Some(preset) = self.preset else {
+            self.note = "RAM size unavailable; preset not staged.".into();
+            return;
+        };
+        if self.draft.original.setting_explicit(key)
+            && self.draft.original.triggers.min_available_mb == preset.floor_mib
+        {
+            self.note = match self.draft.unstage(key) {
+                Ok(()) => {
+                    self.preset_staged = false;
+                    "File already matches the preset.".into()
+                }
+                Err(error) => error,
+            };
+            return;
+        }
+        match self.draft.stage(key, &preset.floor_mib.to_string()) {
+            Ok(()) => {
+                self.preset_staged = true;
+                self.note = "System preset staged. No file written.".into();
+            }
+            Err(error) => self.note = error,
+        }
     }
 
     pub(crate) fn input(&mut self, key: u8) -> Outcome {
@@ -160,6 +244,7 @@ impl Editor {
                     self.buffer.clear();
                     self.note.clear();
                 }
+                b'p' => self.stage_preset(),
                 b'w' if !self.changes().is_empty() => {
                     self.mode = Mode::Confirm;
                     self.review_page = 0;
@@ -181,13 +266,20 @@ impl Editor {
                 }
                 b'\r' | b'\n' => match self.draft.stage(FIELDS[self.selected].0, &self.buffer) {
                     Ok(()) => {
-                        if values(&self.draft.original)[self.selected]
-                            == values(&self.draft.proposed)[self.selected]
+                        if self
+                            .draft
+                            .original
+                            .setting_explicit(FIELDS[self.selected].0)
+                            && values(&self.draft.original)[self.selected]
+                                == values(&self.draft.proposed)[self.selected]
                         {
                             if let Err(error) = self.draft.unstage(FIELDS[self.selected].0) {
                                 self.note = error;
                                 return Outcome::Continue;
                             }
+                        }
+                        if self.selected == FLOOR {
+                            self.preset_staged = false;
                         }
                         self.mode = Mode::Browse;
                         self.note = "Staged only. No file written.".into();
@@ -249,7 +341,37 @@ impl Editor {
                     after[i].clone(),
                     FIELDS[i].1.into(),
                 ]);
-                vec![format!("Review {}/{} | j/k Next/previous change", self.review_page + 1, changed.len()), "Saving changes what cleanup can do after a daemon reload or restart.".into(), "No signal or reload is sent. Enter Save file | Esc Back | q Quit without saving".into()]
+                let origin = if self.draft.original.setting_explicit(FIELDS[i].0) {
+                    "file"
+                } else {
+                    "built-in fallback"
+                };
+                let proposal = if i == FLOOR && self.preset_staged {
+                    "system preset"
+                } else {
+                    "manual"
+                };
+                let mut hints = vec![
+                    format!(
+                        "Review {}/{} | j/k Next/previous change",
+                        self.review_page + 1,
+                        changed.len()
+                    ),
+                    format!("Source: {origin} → {proposal}"),
+                ];
+                if i == FLOOR
+                    && self.draft.proposed.triggers.min_available_mb
+                        > self.draft.original.triggers.min_available_mb
+                {
+                    hints.push("A higher floor can trigger cleanup sooner after reload.".into());
+                } else {
+                    hints.push(
+                        "Saving changes what cleanup can do after a daemon reload or restart."
+                            .into(),
+                    );
+                }
+                hints.push("No signal or reload is sent. Enter Save file | Esc Back | q Quit without saving".into());
+                hints
             }
         };
         (rows, hints)
@@ -289,6 +411,151 @@ mod tests {
     }
 
     #[test]
+    fn watch_preset_is_capacity_only_and_avoids_idle_small_host_trigger() {
+        use crate::metrics::{MemoryInfo, PsiMemory, SystemSnapshot};
+        use crate::triggers::{LocalTime, TriggerEngine};
+        use std::time::Instant;
+        for (ram_mib, floor_mib) in [
+            (1024, 128),
+            (4096, 192),
+            (8192, 384),
+            (16384, 704),
+            (32768, 1344),
+            (65536, 1536),
+        ] {
+            let preset = SystemPreset::from_ram_mib(ram_mib).unwrap();
+            assert_eq!(preset.floor_mib, floor_mib);
+            let now = Instant::now();
+            let local = LocalTime {
+                year: 2026,
+                month: 11,
+                day: 23,
+                hour: 12,
+                minute: 0,
+                weekday: 1,
+            };
+            for (available_mb, load_avg_1m) in [(ram_mib * 3 / 4, 0.0), (ram_mib / 2, 9.0)] {
+                let snap = SystemSnapshot {
+                    memory: MemoryInfo {
+                        total_mb: ram_mib,
+                        available_mb,
+                        used_mb: ram_mib - available_mb,
+                        ..Default::default()
+                    },
+                    psi: PsiMemory::default(),
+                    swaps: vec![],
+                    tmpfs_mounts: vec![],
+                    load_avg_1m,
+                    load_avg_5m: 0.0,
+                    load_avg_15m: 0.0,
+                    cpu_count: 1,
+                };
+                let mut cfg = Config::default();
+                let legacy = TriggerEngine::new(cfg.clone()).evaluate(&snap, local, now);
+                assert_eq!(legacy.should_run, ram_mib == 1024);
+                if ram_mib == 1024 {
+                    assert!(legacy.reasons.iter().any(|r| r.contains("Available RAM")));
+                }
+                cfg.triggers.min_available_mb = SystemPreset::from_ram_mib(snap.memory.total_mb)
+                    .unwrap()
+                    .floor_mib;
+                assert_eq!(cfg.triggers.min_available_mb, floor_mib);
+                assert!(cfg.validate().is_empty());
+                assert!(
+                    !TriggerEngine::new(cfg)
+                        .evaluate(&snap, local, now)
+                        .should_run
+                );
+            }
+        }
+        assert!(SystemPreset::from_ram_mib(0).is_none());
+        assert_eq!(
+            SystemPreset::from_ram_mib(u64::MAX).unwrap().floor_mib,
+            1536
+        );
+    }
+
+    #[test]
+    fn watch_preset_respects_explicit_source_until_deliberate_review_and_save() {
+        let fixture = Fixture::write();
+        let dest = fixture.0.join("settings.toml");
+        let missing = "[triggers] # existing heading\r\nram_used_percent = 87.0\r\n[logging]\r\nlevel = \"WARN\"\r\n";
+        let preset = SystemPreset::from_ram_mib(8192);
+        fs::write(&dest, missing).unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o640)).unwrap();
+        let make_editor = || {
+            Editor::open(
+                &crate::config::load_watch_config(Some(&dest)).unwrap(),
+                preset,
+            )
+            .unwrap()
+        };
+        let mut editor = make_editor();
+        let original = editor.draft.original.clone();
+        assert_eq!(source(&original, 0, None), 'F');
+        assert_eq!(source(&original, FLOOR, None), 'B');
+        editor.input(b'p');
+        assert!(editor.changes().is_empty());
+        editor.input(b'j');
+        editor.input(b'p');
+        assert_eq!(source(&original, FLOOR, Some(&editor)), 'P');
+        assert_eq!(editor.draft.proposed.triggers.min_available_mb, 384);
+        editor.input(b'w');
+        assert!(editor
+            .review()
+            .1
+            .iter()
+            .any(|line| line.contains("built-in fallback → system preset")));
+        assert_eq!(fs::read_to_string(&dest).unwrap(), missing);
+        assert!(matches!(editor.input(b'\r'), Outcome::Save));
+        let saved = editor.draft.save().unwrap();
+        assert_eq!(source(&saved, FLOOR, None), 'F');
+        assert_eq!(
+            fs::read_to_string(&dest).unwrap(),
+            missing.replace("[logging]", "min_available_mb = 384\r\n[logging]")
+        );
+        drop(editor);
+        let mut editor = make_editor();
+        assert_eq!(editor.draft.proposed.triggers.min_available_mb, 384);
+        editor.input(b'j');
+        editor.input(b'\r');
+        for b in b"256\r" {
+            editor.input(*b);
+        }
+        assert_eq!(source(&saved, FLOOR, Some(&editor)), 'M');
+        editor.input(b'p');
+        // Explicitly choosing the exact existing source clears the manual draft.
+        assert!(editor.changes().is_empty());
+        fs::write(
+            &dest,
+            missing.replace("[logging]", "min_available_mb = 0\r\n[logging]"),
+        )
+        .unwrap();
+        let mut editor = make_editor();
+        assert_eq!(editor.draft.proposed.triggers.min_available_mb, 0);
+        editor.input(b'j');
+        editor.input(b'p');
+        editor.input(b'w');
+        assert!(editor
+            .review()
+            .1
+            .iter()
+            .any(|line| line.contains("file → system preset")));
+        assert!(editor
+            .review()
+            .1
+            .iter()
+            .any(|line| line.contains("trigger cleanup sooner")));
+        assert_eq!(
+            crate::config::load_watch_config(Some(&dest))
+                .unwrap()
+                .triggers
+                .min_available_mb,
+            0
+        );
+    }
+
+    #[test]
     fn stage_cancel_confirm_atomically_saves_only_the_fixture_with_original_permissions() {
         let fixture = Fixture::write();
         let dest = fixture.0.join("settings.toml");
@@ -297,7 +564,13 @@ mod tests {
         fs::write(&dest, base).unwrap();
         fs::set_permissions(&dest, fs::Permissions::from_mode(0o640)).unwrap();
         fs::write(&other, b"unchanged").unwrap();
-        let launch = || Editor::open(&crate::config::load_config(Some(&dest)).unwrap()).unwrap();
+        let launch = || {
+            Editor::open(
+                &crate::config::load_watch_config(Some(&dest)).unwrap(),
+                None,
+            )
+            .unwrap()
+        };
         let mut first = launch();
         assert!(matches!(first.input(b'\r'), Outcome::Continue));
         for ch in b"999" {
