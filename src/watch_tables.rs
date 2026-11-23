@@ -16,7 +16,10 @@ pub(crate) struct Report<'a> {
 
 impl Report<'_> {
     pub(crate) fn render(&self, width: usize, p: &Palette) -> Vec<String> {
-        let layout = Layout::new(p);
+        let width = width.min(126);
+        let layout = Layout::board(p);
+        // Keep a common right-column anchor on the wide canvas.
+        let left_lane = if width >= 112 { 61 } else { (width - 1) / 2 };
         let snap = self.snapshot;
         let mem = &snap.memory;
         let t = &self.config.triggers;
@@ -28,7 +31,7 @@ impl Report<'_> {
         };
         let mut output = layout.text(
             &format!(
-                "{}keep-ram-clean v{}{}  │  {color}{badge}{}",
+                "{}keep-ram-clean v{}{}  │  WATCH  │  {color}{badge}{}",
                 p.bold,
                 crate::daemon::VERSION,
                 p.nc,
@@ -177,31 +180,33 @@ impl Report<'_> {
                 )
             }
         };
-        if width >= 120 {
-            output.extend(layout.pair(
-                width,
-                |w| {
-                    let mut rows = left(w);
-                    rows.extend(detail_table(w));
-                    rows
-                },
-                |w| {
-                    let mut rows = pressure_table(w);
-                    rows.extend(consumer_table(w));
-                    rows
-                },
-            ));
-        } else if width >= 80 {
-            output.extend(left(width));
-            output.extend(layout.pair(width, detail_table, pressure_table));
-            output.extend(consumer_table(width));
+        output.extend(layout.band(width, "01", "LIVE READINGS"));
+        if width >= 96 {
+            output.extend(layout.pair_at(width, left_lane, left, pressure_table));
         } else {
             output.extend(left(width));
-            output.extend(detail_table(width));
             output.extend(pressure_table(width));
+        }
+
+        // Each band starts on one baseline. Nearby headings don't jump up or down
+        // based on how many rows are in a neighbor in the previous band.
+        output.extend(layout.band(width, "02", "RESOURCE DETAILS"));
+        let storage = |w| {
+            let mut out = detail_table(w);
+            let swaps = layout.swap_devices(&snap.swaps, w);
+            if !swaps.is_empty() {
+                out.push(String::new());
+                out.extend(swaps);
+            }
+            out
+        };
+        if width >= 112 {
+            output.extend(layout.pair_at(width, left_lane, storage, consumer_table));
+        } else {
+            output.extend(storage(width));
+            output.push(String::new());
             output.extend(consumer_table(width));
         }
-        output.extend(layout.swap_devices(&snap.swaps, width));
 
         let when = if t.interval_minutes > 0 {
             format!("Every {}m", t.interval_minutes)
@@ -210,7 +215,7 @@ impl Report<'_> {
         } else {
             "Reactive".into()
         };
-        let mut status = vec![
+        let triggers = [
             vec![
                 "RAM / Available / Swap".into(),
                 format!(
@@ -237,6 +242,7 @@ impl Report<'_> {
                 ),
             ],
         ];
+        let mut status = Vec::new();
         if let Some(d) = active {
             if d.cleaning_now {
                 status.push(vec!["State".into(), "Auto-clean in progress".into()]);
@@ -264,12 +270,15 @@ impl Report<'_> {
                 "Daemon not running. Start the daemon or systemd service.".into(),
             ]);
         }
-        output.extend(layout.table(
-            "AUTO-CLEAN ACTIVITY & TRIGGERS",
-            &["FIELD", "VALUE"],
-            &status,
-            width,
-        ));
+        output.extend(layout.band(width, "03", "AUTO-CLEAN"));
+        let daemon = |w| layout.table("DAEMON STATE", &["FIELD", "VALUE"], &status, w);
+        let policy = |w| layout.table("TRIGGERS", &["SETTING", "VALUE"], &triggers, w);
+        if width >= 112 {
+            output.extend(layout.pair_at(width, left_lane, daemon, policy));
+        } else {
+            output.extend(daemon(width));
+            output.extend(policy(width));
+        }
         if let Some(d) = active {
             let recent: Vec<_> = if d.recent_cleanups.is_empty() {
                 d.last_cleanup.iter().collect()
@@ -520,6 +529,23 @@ mod tests {
             };
             assert!(span("/dev/zram0", "partition") <= 8);
             assert!(span(" RAM", "4.0 GiB") <= 22);
+        }
+        for width in [35, 80, 120, 200, 240] {
+            let rows = normal.render(width, &p);
+            let row_of = |needle: &str| rows.iter().position(|row| row.contains(needle)).unwrap();
+            let live = row_of("01  LIVE READINGS");
+            let detail = row_of("02  RESOURCE DETAILS");
+            let cleanup = row_of("03  AUTO-CLEAN");
+            assert!(live < row_of("PRESSURE & LOAD") && row_of("PRESSURE & LOAD") < detail);
+            assert!(detail < row_of("SWAP DEVICES") && row_of("SWAP DEVICES") < cleanup);
+            assert!(cleanup < row_of("TRIGGERS") && row_of("TRIGGERS") < row_of("RECENT CLEANUPS"));
+            if width >= 120 {
+                let anchors = ["PRESSURE & LOAD", "TOP 1 CONSUMERS", "TRIGGERS"].map(|label| {
+                    let line = &rows[row_of(label)];
+                    line[..line.find(label).unwrap()].chars().count()
+                });
+                assert_eq!(anchors, [anchors[0]; 3]);
+            }
         }
         let colored = Palette {
             color: true,

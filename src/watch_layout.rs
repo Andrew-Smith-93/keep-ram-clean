@@ -8,6 +8,7 @@ unsafe extern "C" {
 /// Use the UTF-8 width table on this thread without changing the process locale.
 pub(crate) struct Layout<'a> {
     p: &'a Palette,
+    framed: bool,
     locale: libc::locale_t,
     previous_locale: libc::locale_t,
 }
@@ -36,8 +37,52 @@ impl<'a> Layout<'a> {
         };
         Self {
             p,
+            framed: true,
             locale,
             previous_locale,
+        }
+    }
+
+    pub(crate) fn board(p: &'a Palette) -> Self {
+        let mut layout = Self::new(p);
+        layout.framed = false;
+        layout
+    }
+
+    pub(crate) fn band(&self, width: usize, number: &str, title: &str) -> Vec<String> {
+        let p = self.p;
+        let label = format!("{number}  {title}");
+        let rule = width.min(108).saturating_sub(self.width(&label) + 2);
+        let text = if rule > 0 {
+            format!(
+                "{}{}{label}{}  {}{}{}",
+                p.bold,
+                p.cyan,
+                p.nc,
+                p.dim,
+                "─".repeat(rule),
+                p.nc
+            )
+        } else {
+            format!("{}{}{label}{}", p.bold, p.cyan, p.nc)
+        };
+        self.text(&text, width)
+    }
+
+    fn table_surface(&self, panel: &Panel<'_>, width: usize) -> Vec<String> {
+        if self.framed {
+            self.panel(panel, width)
+        } else {
+            let p = self.p;
+            let indent = 2;
+            let mut output = self.text(
+                &format!("{}{title}{}", p.bold, p.nc, title = panel.title),
+                width - indent,
+            );
+            for line in panel.lines {
+                output.extend(self.text(line, width - indent));
+            }
+            output.into_iter().map(|row| format!("  {row}")).collect()
         }
     }
 
@@ -354,7 +399,7 @@ impl<'a> Layout<'a> {
                 ));
             }
         }
-        self.panel(
+        self.table_surface(
             &Panel {
                 title: "SWAP DEVICES",
                 badge: "",
@@ -372,15 +417,28 @@ impl<'a> Layout<'a> {
         left: impl FnOnce(usize) -> Vec<String>,
         right: impl FnOnce(usize) -> Vec<String>,
     ) -> Vec<String> {
-        let lw = (width - 1) / 2;
-        let rw = width - lw - 1;
+        self.pair_at(width, (width - 1) / 2, left, right)
+    }
+
+    pub(crate) fn pair_at(
+        &self,
+        width: usize,
+        lw: usize,
+        left: impl FnOnce(usize) -> Vec<String>,
+        right: impl FnOnce(usize) -> Vec<String>,
+    ) -> Vec<String> {
+        let gutter = if self.framed { 1 } else { 3 };
+        let rw = width - lw - gutter;
         let mut l = left(lw);
         let mut r = right(rw);
-        let used_left = l
-            .iter()
-            .map(|line| self.width(line))
-            .max()
-            .unwrap_or_default();
+        let used_left = if self.framed {
+            l.iter()
+                .map(|line| self.width(line))
+                .max()
+                .unwrap_or_default()
+        } else {
+            lw
+        };
         let n = l.len().max(r.len());
         l.resize(n, String::new());
         r.resize(n, String::new());
@@ -390,7 +448,7 @@ impl<'a> Layout<'a> {
                 if b.is_empty() {
                     a
                 } else {
-                    let padding = used_left - self.width(&a) + 1;
+                    let padding = used_left.saturating_sub(self.width(&a)) + gutter;
                     format!("{a}{}{b}", " ".repeat(padding))
                 }
             })
@@ -495,7 +553,7 @@ impl<'a> Layout<'a> {
                 lines.extend(headers.iter().zip(row).map(|(h, v)| format!("{h}: {v}")));
             }
         }
-        self.panel(
+        self.table_surface(
             &Panel {
                 title,
                 badge: "",
