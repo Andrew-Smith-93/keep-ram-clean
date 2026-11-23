@@ -395,10 +395,10 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let dir = std::env::current_dir()
-                .unwrap()
-                .join("target")
-                .join(format!("watch-fixture-{}-{suffix}", std::process::id()));
+            // The release build mounts its checkout read-only and sets an
+            // external Cargo target directory; test files belong in TMPDIR.
+            let dir =
+                std::env::temp_dir().join(format!("watch-fixture-{}-{suffix}", std::process::id()));
             fs::create_dir(&dir).unwrap();
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
             Self(dir)
