@@ -231,6 +231,7 @@ impl<'a> Layout<'a> {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn columns(&self, left: &Panel<'_>, right: &Panel<'_>, width: usize) -> Vec<String> {
         if width < 96 {
             let mut rows = self.panel(left, width);
@@ -341,6 +342,119 @@ impl<'a> Layout<'a> {
         )
     }
 
+    pub(crate) fn table(
+        &self,
+        title: &str,
+        headers: &[&str],
+        rows: &[Vec<String>],
+        width: usize,
+    ) -> Vec<String> {
+        let inner = width - 4;
+        let gaps = 3 * (headers.len() - 1);
+        let mut lines = Vec::new();
+        if inner >= (gaps + headers.len() * 10).max(36) {
+            let usable = inner - gaps;
+            let mut sizes = vec![8; headers.len()];
+            let mut left = usable - sizes.iter().sum::<usize>();
+            let wants: Vec<_> = headers
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    rows.iter()
+                        .map(|r| self.width(&r[i]))
+                        .max()
+                        .unwrap_or(0)
+                        .max(self.width(h))
+                })
+                .collect();
+            while left != 0 {
+                let slot = (0..sizes.len())
+                    .filter(|&i| sizes[i] < wants[i])
+                    .max_by_key(|&i| wants[i].saturating_sub(sizes[i]));
+                let Some(i) = slot else {
+                    break;
+                };
+                sizes[i] += 1;
+                left -= 1;
+            }
+            sizes[0] += left;
+            let wrapped = |row: &[String]| {
+                let cells: Vec<_> = row
+                    .iter()
+                    .zip(&sizes)
+                    .map(|(s, &size)| self.body(s, size))
+                    .collect();
+                let height = cells.iter().map(Vec::len).max().unwrap_or(1);
+                (0..height)
+                    .map(|y| {
+                        cells
+                            .iter()
+                            .zip(&sizes)
+                            .map(|(c, &n)| c.get(y).cloned().unwrap_or_else(|| " ".repeat(n)))
+                            .collect::<Vec<_>>()
+                            .join(" │ ")
+                    })
+                    .collect::<Vec<_>>()
+            };
+            lines.extend(wrapped(
+                &headers.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            ));
+            lines.push(
+                sizes
+                    .iter()
+                    .map(|n| "─".repeat(*n))
+                    .collect::<Vec<_>>()
+                    .join("─┼─"),
+            );
+            for row in rows {
+                lines.extend(wrapped(row));
+            }
+        } else {
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    lines.push(String::new());
+                }
+                lines.extend(headers.iter().zip(row).map(|(h, v)| format!("{h}: {v}")));
+            }
+        }
+        self.panel(
+            &Panel {
+                title,
+                badge: "",
+                badge_col: "",
+                lines: &lines,
+            },
+            width,
+        )
+    }
+
+    pub(crate) fn editor(&self, editor: &crate::watch_editor::Editor, width: usize) -> Vec<String> {
+        let (table, hints) = editor.view(width);
+        let mut lines = self.banner(
+            "WATCH SETTINGS / EDITOR",
+            &format!(
+                "Target: {}",
+                escape_controls(&editor.draft.path.display().to_string())
+            ),
+            "NO AUTO-SAVE",
+            self.p.yellow,
+            width,
+        );
+        lines.extend(self.table(
+            "STAGED SETTINGS",
+            &["KEY", "ORIGINAL", "PROPOSED", "UNIT"],
+            &table,
+            width,
+        ));
+        if !editor.note.is_empty() {
+            lines.extend(self.text(&escape_controls(&editor.note), width));
+        }
+        for hint in hints {
+            lines.extend(self.text(&hint, width));
+        }
+        lines
+    }
+
     pub(crate) fn settings(
         &self,
         cfg: &crate::Config,
@@ -348,105 +462,122 @@ impl<'a> Layout<'a> {
         interactive: bool,
     ) -> Vec<String> {
         use crate::ui::fmt_mib;
-        let p = self.p;
         let source = cfg.source_path.as_ref().map_or_else(
             || "built-in defaults".into(),
             |path| escape_controls(&path.display().to_string()),
         );
+        let mut rows = self.banner(
+            "WATCH SETTINGS",
+            &format!("Source: {source}"),
+            "READ ONLY UNTIL EDIT",
+            self.p.cyan,
+            width,
+        );
         let t = &cfg.triggers;
         let n = &cfg.notifications;
-        let enabled = |on| if on { "on" } else { "off" };
-        let threshold = |v: f64| {
+        let toggle = |enabled| if enabled { "on" } else { "off" };
+        let pct = |v: f64| {
             if v > 0.0 {
                 format!("{v}%")
             } else {
                 "off".into()
             }
         };
-        let amount = |v| if v > 0 { fmt_mib(v) } else { "off".into() };
-        let heading = |text| format!("{}{text}{}", p.bold, p.nc);
-        let schedules = if t.schedules.is_empty() {
-            "none".into()
-        } else {
-            escape_controls(&t.schedules.join(", "))
-        };
-        let mut lines = vec![
-            format!("Source: {source}"),
-            "Values used by this Watch, not the daemon's loaded settings.".into(),
-            String::new(),
-            heading("WHEN TO ACT"),
-            format!(
-                "RAM used: {}  |  Available floor: {}",
-                threshold(t.ram_used_percent),
-                amount(t.min_available_mb)
-            ),
-            format!(
-                "Swap used: {} or {}  |  Tmpfs used: {}",
-                threshold(t.swap_used_percent),
-                amount(t.swap_used_mb),
-                threshold(t.tmpfs_used_percent)
-            ),
-            format!(
-                "Memory PSI avg10: some {}  |  full {}",
-                threshold(t.psi_some_avg10),
-                threshold(t.psi_full_avg10)
-            ),
-            format!(
-                "Poll: {}s  |  Cooldown: {}s  |  Rearm: {} pp  |  Interval: {}",
-                t.poll_interval_seconds,
-                t.cooldown_seconds,
-                t.hysteresis_percent,
-                if t.interval_minutes == 0 {
-                    "off".into()
-                } else {
-                    format!("{}m", t.interval_minutes)
-                }
-            ),
-            format!("Schedules: {schedules}"),
-            String::new(),
-            heading("WHAT TO DO"),
-            format!(
-                "Kernel: {}  |  Drop caches: level {}{}  |  Swap: {}",
-                enabled(cfg.kernel.enabled),
-                cfg.kernel.drop_caches_level,
-                if cfg.kernel.drop_caches_on_critical_only {
-                    " (critical only)"
-                } else {
-                    ""
-                },
-                enabled(cfg.swap.enabled)
-            ),
-            format!(
-                "Tmpfs: {}  |  User caches: {}  |  Process watchdog: {}",
-                enabled(cfg.tmpfs.enabled),
-                enabled(cfg.user_caches.enabled),
-                enabled(cfg.watchdog.enabled)
-            ),
-            format!(
-                "Notifications: {} (minimum {} MiB{})  |  Logging: {}",
-                enabled(n.enabled),
-                n.min_freed_mb,
-                if n.on_critical_only {
-                    ", critical only"
-                } else {
-                    ""
-                },
-                escape_controls(&cfg.logging.level)
-            ),
+        let amount = |v: u64| if v > 0 { fmt_mib(v) } else { "off".into() };
+        let triggers = [
+            vec!["RAM used".into(), pct(t.ram_used_percent)],
+            vec!["Available floor".into(), amount(t.min_available_mb)],
+            vec![
+                "Swap used % / MiB".into(),
+                format!("{} / {}", pct(t.swap_used_percent), amount(t.swap_used_mb)),
+            ],
+            vec!["Tmpfs used".into(), pct(t.tmpfs_used_percent)],
+            vec![
+                "PSI some / full (avg10)".into(),
+                format!("{} / {}", pct(t.psi_some_avg10), pct(t.psi_full_avg10)),
+            ],
+            vec![
+                "Poll / cooldown / rearm".into(),
+                format!(
+                    "{}s / {}s / {} pp",
+                    t.poll_interval_seconds, t.cooldown_seconds, t.hysteresis_percent
+                ),
+            ],
+            vec![
+                "Interval / schedules".into(),
+                format!(
+                    "{} / {}",
+                    if t.interval_minutes == 0 {
+                        "off".into()
+                    } else {
+                        format!("{}m", t.interval_minutes)
+                    },
+                    if t.schedules.is_empty() {
+                        "none".into()
+                    } else {
+                        escape_controls(&t.schedules.join(", "))
+                    }
+                ),
+            ],
         ];
-        if interactive {
-            lines.push(String::new());
-            lines.push("[s] or Esc Back to Watch  |  [q] Quit".into());
-        }
-        self.panel(
-            &Panel {
-                title: "WATCH SETTINGS",
-                badge: "READ ONLY",
-                badge_col: p.cyan,
-                lines: &lines,
-            },
+        let actions = [
+            vec![
+                "Kernel / drop caches".into(),
+                format!(
+                    "{} / level {}{}",
+                    toggle(cfg.kernel.enabled),
+                    cfg.kernel.drop_caches_level,
+                    if cfg.kernel.drop_caches_on_critical_only {
+                        " (critical only)"
+                    } else {
+                        ""
+                    }
+                ),
+            ],
+            vec![
+                "Swap / tmpfs".into(),
+                format!(
+                    "{} / {}",
+                    toggle(cfg.swap.enabled),
+                    toggle(cfg.tmpfs.enabled)
+                ),
+            ],
+            vec![
+                "User caches / watchdog".into(),
+                format!(
+                    "{} / {}",
+                    toggle(cfg.user_caches.enabled),
+                    toggle(cfg.watchdog.enabled)
+                ),
+            ],
+            vec![
+                "Notifications".into(),
+                format!(
+                    "{} (minimum {} MiB{})",
+                    toggle(n.enabled),
+                    n.min_freed_mb,
+                    if n.on_critical_only {
+                        ", critical only"
+                    } else {
+                        ""
+                    }
+                ),
+            ],
+            vec!["Logging".into(), escape_controls(&cfg.logging.level)],
+        ];
+        rows.extend(self.table("WHEN TO ACT", &["SETTING", "VALUE"], &triggers, width));
+        rows.extend(self.table("WHAT TO DO", &["SETTING", "VALUE"], &actions, width));
+        rows.extend(self.text(
+            "Values used by this Watch, not the daemon's loaded settings.",
             width,
-        )
+        ));
+        if interactive {
+            rows.extend(self.text(
+                "[e] Edit existing config  |  [s] or Esc Back to Watch  |  [q] Quit",
+                width,
+            ));
+        }
+        rows
     }
 
     pub(crate) fn text(&self, line: &str, width: usize) -> Vec<String> {
@@ -619,13 +750,16 @@ mod tests {
         let layout = Layout::new(&p);
         for width in [32, 80, 120] {
             let rows = layout.settings(&cfg, width, true);
-            assert!(rows.iter().all(|line| layout.width(line) == width));
-            let values = unpack(&layout, &rows.join(""));
+            assert!(rows.iter().all(|line| layout.width(line) <= width));
+            let values = unpack(&layout, &rows.join(""))
+                .replace(':', "")
+                .replace("SETTING", "")
+                .replace("VALUE", "");
             for item in [
                 "READONLY",
                 "SOURCE-END.toml",
-                "RAMused:87%",
-                "Notifications:on",
+                "RAMused87%",
+                "Notificationson",
                 "[s]orEscBacktoWatch",
                 "[q]Quit",
             ] {

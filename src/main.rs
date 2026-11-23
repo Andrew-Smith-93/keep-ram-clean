@@ -9,6 +9,8 @@ mod pressure_relief;
 mod triggers;
 mod ui;
 mod watch_layout;
+mod watch_editor;
+mod watch_tables;
 
 use std::fs::{self, File};
 use std::io::{IsTerminal, Write};
@@ -126,10 +128,10 @@ enum Commands {
         /// Number of top memory processes to display
         #[arg(long, default_value_t = 5)]
         top: usize,
-        /// Interactive live-refreshing dashboard mode (s for read-only Settings)
+        /// Interactive live-refreshing dashboard mode (s for Settings)
         #[arg(short, long)]
         watch: bool,
-        /// Start Watch in the dashboard or read-only settings
+        /// Start Watch in the dashboard or settings
         #[arg(long, value_enum, requires = "watch", conflicts_with = "json")]
         view: Option<WatchView>,
         /// Refresh interval in seconds for --watch mode
@@ -298,16 +300,10 @@ fn render_status_dashboard(
     top: usize,
     p: &Palette,
     toast: Option<&str>,
-    watch_mode: bool,
+    watch_scroll: Option<&mut usize>,
     interval: u64,
 ) {
-    let layout = watch_mode.then(|| watch_layout::Layout::new(p));
-    let w = if watch_mode { ui::watch_terminal_width() } else { terminal_width() };
-    let terminal_value = |value: &str| if watch_mode {
-        watch_layout::escape_controls(value)
-    } else {
-        value.to_owned()
-    };
+    let w = if watch_scroll.is_some() { ui::watch_terminal_width() } else { terminal_width() };
     let two_col = w >= 96;
     let col_inner = if two_col {
         ((w - 1) / 2).saturating_sub(4)
@@ -319,6 +315,24 @@ fn render_status_dashboard(
     let snap = collect_snapshot(Some(&cfg.tmpfs.paths), true, true, true, true);
     let top_procs = top_memory_processes(top);
     let daemon_state = read_daemon_state(None);
+    if let Some(offset) = watch_scroll {
+        let report = watch_tables::Report {
+            config: cfg, snapshot: &snap, processes: &top_procs,
+            daemon: daemon_state.as_ref(), toast, interval,
+        };
+        let rows = report.render(w, p);
+        let (rows, clipped) = if p.color {
+            watch_tables::viewport(rows, w, ui::watch_terminal_height(), offset)
+        } else {
+            (rows, false)
+        };
+        let last = rows.len().saturating_sub(1);
+        for (i, line) in rows.into_iter().enumerate() {
+            if clipped && i == last { print!("{line}"); } else { println!("{line}"); }
+        }
+        return;
+    }
+
     let mem = &snap.memory;
     let t = &cfg.triggers;
 
@@ -341,12 +355,7 @@ fn render_status_dashboard(
         mem.swap_used_percent(),
         snap.load_avg_1m
     );
-    let title = format!("keep-ram-clean v{VERSION}");
-    if let Some(layout) = &layout {
-        layout.print(layout.banner(&title, &center, badge, badge_col, w));
-    } else {
-        print_banner(&title, &center, badge, badge_col, w, p);
-    }
+    print_banner(&format!("keep-ram-clean v{VERSION}"), &center, badge, badge_col, w, p);
 
     // --- Left Panel: MEMORY, SWAP & TMPFS ---
     let mut left_lines: Vec<String> = Vec::new();
@@ -402,7 +411,7 @@ fn render_status_dashboard(
         let col = p.severity_color(pct, tmp_warn, tmp_crit);
         left_lines.push(format!(
             "{:<5} {bar} {col}{:>5.1}%{} {}/{}",
-            if watch_mode { terminal_value(&m.mountpoint) } else { truncate_str(&m.mountpoint, 5) },
+            truncate_str(&m.mountpoint, 5),
             pct,
             p.nc,
             fmt_mib(m.used_mb),
@@ -423,7 +432,7 @@ fn render_status_dashboard(
         fmt_mib(mem.dirty_mb)
     ));
 
-    if !watch_mode && !snap.swaps.is_empty() {
+    if !snap.swaps.is_empty() {
         let dev_summary: Vec<String> = snap
             .swaps
             .iter()
@@ -431,7 +440,7 @@ fn render_status_dashboard(
                 let tag = if s.is_zram() { "[zram]" } else { "" };
                 format!(
                     "{}{tag} {}/{}",
-                    terminal_value(&s.path),
+                    s.path,
                     fmt_mib(s.used_mb),
                     fmt_mib(s.size_mb)
                 )
@@ -482,7 +491,7 @@ fn render_status_dashboard(
             p.dim,
             proc.pid,
             p.nc,
-            if watch_mode { terminal_value(&proc.comm) } else { truncate_str(&proc.comm, name_w) },
+            truncate_str(&proc.comm, name_w),
             fmt_mib_f64(proc.rss_mb),
             p.dim,
             frac * 100.0,
@@ -490,17 +499,7 @@ fn render_status_dashboard(
         ));
     }
 
-    if let Some(layout) = &layout {
-        let free_badge = format!("{} free", fmt_mib(mem.available_mb));
-        let top_badge = format!("Top {}", top_procs.len());
-        let left = Panel {
-            title: "MEMORY · SWAP · TMPFS", badge: &free_badge, badge_col: p.green, lines: &left_lines,
-        };
-        let right = Panel {
-            title: "PRESSURE & TOP CONSUMERS", badge: &top_badge, badge_col: p.cyan, lines: &right_lines,
-        };
-        layout.print(layout.columns(&left, &right, w));
-    } else if two_col {
+    if two_col {
         let free_badge = format!("{} free", fmt_mib(mem.available_mb));
         let top_badge = format!("Top {}", top_procs.len());
         print_two_panels(
@@ -524,57 +523,15 @@ fn render_status_dashboard(
         print_panel("PRESSURE & TOP CONSUMERS", "", "", &right_lines, w, p);
     }
 
-    if let Some(layout) = &layout {
-        layout.print(layout.swap_devices(&snap.swaps, w));
-    }
-
     // Bottom panel shares the same activity fields and history limit as before.
-    let auto_lines = status_activity_lines(cfg, p, daemon_state.as_ref(), terminal_value);
+    let auto_lines = status_activity_lines(cfg, p, daemon_state.as_ref(), str::to_owned);
 
     let (act_badge, act_col) = if cleaning_now {
         ("CLEANING", p.yellow)
     } else {
         ("STANDBY", p.dim)
     };
-    if let Some(layout) = &layout {
-        let panel = Panel {
-            title: "AUTO-CLEAN ACTIVITY & TRIGGERS", badge: act_badge, badge_col: act_col, lines: &auto_lines,
-        };
-        layout.print(layout.panel(&panel, w));
-    } else {
-        print_panel("AUTO-CLEAN ACTIVITY & TRIGGERS", act_badge, act_col, &auto_lines, w, p);
-    }
-
-    if let Some(msg) = toast {
-        let toast_line = format!("  {}{}{}", p.cyan, terminal_value(msg), p.nc);
-        if let Some(layout) = &layout {
-            layout.print(layout.text(&toast_line, w));
-        } else {
-            println!("{toast_line}");
-        }
-    }
-    if watch_mode {
-        let controls = format!(
-            "  {}[c]{} Clean now   {}[+/-]{} RAM trigger ({:.0}%)   {}[n]{} Alerts   {}[r]{} Reload   {}[q]{} Quit   [s] Settings (read only)   {}({}s refresh){}",
-            p.bold,
-            p.nc,
-            p.bold,
-            p.nc,
-            t.ram_used_percent,
-            p.bold,
-            p.nc,
-            p.bold,
-            p.nc,
-            p.bold,
-            p.nc,
-            p.dim,
-            interval,
-            p.nc
-        );
-        if let Some(layout) = &layout {
-            layout.print(layout.text(&controls, w));
-        }
-    }
+    print_panel("AUTO-CLEAN ACTIVITY & TRIGGERS", act_badge, act_col, &auto_lines, w, p);
 }
 
 fn status_activity_lines(
@@ -712,9 +669,15 @@ fn watch_input(view: WatchView, key: u8) -> WatchInput {
     }
 }
 
-fn render_watch_settings(cfg: &Config, p: &Palette) {
+fn render_watch_settings(cfg: &Config, p: &Palette, editor: Option<&watch_editor::Editor>, message: &str) {
     let layout = watch_layout::Layout::new(p);
-    layout.print(layout.settings(cfg, ui::watch_terminal_width(), std::io::stdin().is_terminal() && std::io::stdout().is_terminal()));
+    let width = ui::watch_terminal_width();
+    if let Some(editor) = editor {
+        layout.print(layout.editor(editor, width));
+    } else {
+        layout.print(layout.settings(cfg, width, std::io::stdin().is_terminal() && std::io::stdout().is_terminal()));
+        if !message.is_empty() { layout.print(layout.text(&watch_layout::escape_controls(message), width)); }
+    }
 }
 
 fn cmd_status(
@@ -785,7 +748,7 @@ fn cmd_status(
     }
 
     if !watch {
-        render_status_dashboard(&cfg, top, &p, None, false, interval);
+        render_status_dashboard(&cfg, top, &p, None, None, interval);
         return 0;
     }
 
@@ -793,7 +756,7 @@ fn cmd_status(
     if view == WatchView::Config
         && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
     {
-        render_watch_settings(&cfg, &p);
+        render_watch_settings(&cfg, &p, None, "");
         return 0;
     }
 
@@ -807,6 +770,9 @@ fn cmd_status(
     }
 
     let term = RawTerminalGuard::enter();
+    let mut editor = None;
+    let mut watch_scroll = 0usize;
+    let mut settings_message = String::new();
     let mut first = true;
     let mut toast: Option<(String, Instant)> = None;
 
@@ -825,10 +791,10 @@ fn cmd_status(
             }
         }
         if view == WatchView::Config {
-            render_watch_settings(&cfg, &p);
+            render_watch_settings(&cfg, &p, editor.as_ref(), &settings_message);
         } else {
             render_status_dashboard(
-                &cfg, top, &p, toast.as_ref().map(|(m, _)| m.as_str()), true, sleep_secs,
+                &cfg, top, &p, toast.as_ref().map(|(m, _)| m.as_str()), Some(&mut watch_scroll), sleep_secs,
             );
         }
         let _ = std::io::stdout().flush();
@@ -836,12 +802,40 @@ fn cmd_status(
         let deadline = Instant::now() + Duration::from_secs(sleep_secs);
         while Instant::now() < deadline && !WATCH_STOP.load(Ordering::SeqCst) {
             if let Some(key) = term.poll_key(100) {
+                if let Some(active) = editor.as_mut() {
+                    use watch_editor::Outcome;
+                    match active.input(key) {
+                        Outcome::Continue => {}
+                        Outcome::Cancel => {
+                            editor = None;
+                            settings_message = "Draft discarded; no file written.".into();
+                        }
+                        Outcome::Quit => { WATCH_STOP.store(true, Ordering::SeqCst); }
+                        Outcome::Save => match active.draft.save() {
+                            Ok(saved) => {
+                                cfg = saved;
+                                editor = None;
+                                settings_message = "Saved the selected file. No daemon reload was sent.".into();
+                            }
+                            Err(error) => active.note = error,
+                        },
+                    }
+                    break;
+                }
+                if view == WatchView::Config && key == b'e' {
+                    match watch_editor::Editor::open(&cfg) {
+                        Ok(opened) => { editor = Some(opened); settings_message.clear(); }
+                        Err(error) => settings_message = error,
+                    }
+                    break;
+                }
                 let key = match watch_input(view, key) {
                     WatchInput::Quit => {
                         WATCH_STOP.store(true, Ordering::SeqCst);
                         break;
                     }
                     WatchInput::View(next) => {
+                        settings_message.clear();
                         view = next;
                         break;
                     }
@@ -849,6 +843,8 @@ fn cmd_status(
                     WatchInput::DashboardKey(key) => key,
                 };
                 let msg = match key {
+                    b'j' if p.color => { watch_scroll = watch_scroll.saturating_add(1); break; }
+                    b'k' if p.color => { watch_scroll = watch_scroll.saturating_sub(1); break; }
                     b'c' | b'C' => match signal_daemon(libc::SIGUSR1, "SIGUSR1", None) {
                         Ok(m) => Some(format!("⚡ {m}")),
                         Err(e) => Some(format!("✖ {e}")),

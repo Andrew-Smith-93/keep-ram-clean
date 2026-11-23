@@ -782,6 +782,235 @@ pub fn update_config_setting(
     Ok((dest, cfg, format!("{section}.{key}"), formatted))
 }
 
+/// A Watch editor transaction is pinned to one existing, owner-controlled file.
+pub(crate) struct WatchConfigDraft {
+    pub(crate) path: PathBuf,
+    baseline: String,
+    identity: fs::Metadata,
+    pub(crate) original: Config,
+    pub(crate) proposed: Config,
+    patches: Vec<(&'static str, &'static str, String)>,
+}
+
+fn check_watch_file(path: &Path) -> Result<fs::Metadata, String> {
+    let meta = fs::symlink_metadata(path)
+        .map_err(|e| format!("Cannot inspect {}: {e}", path.display()))?;
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.mode() & 0o7022 != 0
+        || meta.nlink() != 1
+    {
+        return Err("Settings can save only a regular, singly linked file you own that is not writable by group or others.".into());
+    }
+    Ok(meta)
+}
+
+fn same_watch_file(first: &fs::Metadata, current: &fs::Metadata) -> bool {
+    first.dev() == current.dev()
+        && first.ino() == current.ino()
+        && first.uid() == current.uid()
+        && first.gid() == current.gid()
+        && first.mode() == current.mode()
+        && first.ctime() == current.ctime()
+        && first.ctime_nsec() == current.ctime_nsec()
+}
+
+fn parse_watch_config(text: &str, path: &Path) -> Result<Config, String> {
+    let mut cfg: Config = toml::from_str(text).map_err(|e| format!("Invalid TOML: {e}"))?;
+    let errors = cfg.validate();
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    cfg.source_path = Some(path.to_owned());
+    Ok(cfg)
+}
+
+// Preserve comments, indentation, and line endings when changing existing scalar keys.
+fn patch_watch_key(text: &str, section: &str, key: &str, value: &str) -> String {
+    let header = format!("[{section}]");
+    let mut inside = false;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed
+                .split('#')
+                .next()
+                .is_some_and(|s| s.trim_end() == header);
+        } else if inside && !trimmed.starts_with('#') {
+            if let Some((lhs, rhs)) = line.split_once('=') {
+                if lhs.trim() == key {
+                    let start = offset + lhs.len() + 1;
+                    let prefix = rhs.len() - rhs.trim_start_matches([' ', '\t']).len();
+                    let before_comment = rhs.split('#').next().unwrap_or(rhs);
+                    let end = start + before_comment.trim_end().len();
+                    if start + prefix <= end {
+                        return format!("{}{value}{}", &text[..start + prefix], &text[end..]);
+                    }
+                }
+            }
+        }
+        offset += line.len();
+    }
+    patch_toml_key(text, section, key, value)
+}
+
+impl WatchConfigDraft {
+    pub(crate) fn open(source: Option<&Path>) -> Result<Self, String> {
+        let path = source.ok_or("Watch is using built-in defaults. Create a config with init-config, then start Watch with --config PATH.")?;
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            env::current_dir()
+                .map_err(|e| format!("Cannot resolve config path: {e}"))?
+                .join(path)
+        };
+        let parent = path.parent().ok_or("Missing config directory")?;
+        let parent = parent
+            .canonicalize()
+            .map_err(|e| format!("Cannot resolve config directory: {e}"))?;
+        let directory =
+            fs::metadata(&parent).map_err(|e| format!("Cannot inspect config directory: {e}"))?;
+        if directory.uid() != unsafe { libc::geteuid() } || directory.mode() & 0o022 != 0 {
+            return Err("Settings can save only in a config directory you own that is not writable by group or others.".into());
+        }
+        let path = parent.join(path.file_name().ok_or("Missing config filename")?);
+        let identity = check_watch_file(&path)?;
+        let baseline = read_config_text_secure(&path, is_root())?;
+        if !same_watch_file(&identity, &check_watch_file(&path)?) {
+            return Err("Config changed while opening. Open the editor again.".into());
+        }
+        let original = parse_watch_config(&baseline, &path)?;
+        let proposed = original.clone();
+        Ok(Self {
+            path,
+            baseline,
+            identity,
+            original,
+            proposed,
+            patches: Vec::new(),
+        })
+    }
+
+    pub(crate) fn stage(&mut self, alias: &str, value: &str) -> Result<(), String> {
+        let (section, key, kind) = resolve_setting_alias(alias)
+            .ok_or("Unknown setting key. Use one of the keys shown in the editor.")?;
+        let formatted = format_toml_scalar(kind, value)?;
+        let mut draft = self.patches.clone();
+        draft.retain(|(s, k, _)| (s, k) != (&section, &key));
+        draft.push((section, key, formatted));
+        // Validate the whole proposed file before replacing the previous draft.
+        let text = self.patched(&draft);
+        let proposed = parse_watch_config(&text, &self.path)?;
+        // Confirm the line patch did not accidentally alter an unrelated TOML node.
+        let mut expected: toml::Value =
+            toml::from_str(&self.baseline).map_err(|e| format!("{e}"))?;
+        let table = expected.as_table_mut().ok_or("Invalid TOML root")?;
+        for (s, k, v) in &draft {
+            let value: toml::Value =
+                toml::from_str(&format!("value = {v}")).map_err(|e| format!("{e}"))?;
+            let section = table
+                .entry((*s).to_owned())
+                .or_insert_with(|| toml::Value::Table(Default::default()));
+            section
+                .as_table_mut()
+                .ok_or("Invalid TOML section")?
+                .insert((*k).to_owned(), value["value"].clone());
+        }
+        let actual: toml::Value = toml::from_str(&text).map_err(|e| format!("{e}"))?;
+        if actual != expected {
+            return Err(
+                "This TOML uses syntax the Watch editor cannot safely patch. Edit it directly."
+                    .into(),
+            );
+        }
+        self.patches = draft;
+        self.proposed = proposed;
+        Ok(())
+    }
+
+    pub(crate) fn unstage(&mut self, alias: &str) -> Result<(), String> {
+        let (section, key, _) = resolve_setting_alias(alias).ok_or("Unknown setting key")?;
+        let mut patches = self.patches.clone();
+        patches.retain(|(s, k, _)| (s, k) != (&section, &key));
+        let proposed = parse_watch_config(&self.patched(&patches), &self.path)?;
+        self.patches = patches;
+        self.proposed = proposed;
+        Ok(())
+    }
+
+    fn patched(&self, patches: &[(&str, &str, String)]) -> String {
+        patches
+            .iter()
+            .fold(self.baseline.clone(), |text, (s, k, v)| {
+                patch_watch_key(&text, s, k, v)
+            })
+    }
+
+    fn check_unchanged(&self) -> Result<(), String> {
+        let current = check_watch_file(&self.path)?;
+        let text = read_config_text_secure(&self.path, is_root())?;
+        if !same_watch_file(&self.identity, &current)
+            || self.baseline != text
+            || !same_watch_file(&current, &check_watch_file(&self.path)?)
+        {
+            return Err("Config changed on disk. Nothing saved; reopen the editor.".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn save(&self) -> Result<Config, String> {
+        if self.patches.is_empty() {
+            return Err("No staged changes.".into());
+        }
+        // Serialize Watch saves without creating a lock file or changing the directory.
+        // External editors may not take this lock; compare identity and bytes again before rename.
+        use std::os::fd::AsRawFd as _;
+        let parent = self.path.parent().ok_or("Missing config directory")?;
+        let guard = File::options()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)
+            .map_err(|e| format!("Cannot open config directory: {e}"))?;
+        if unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err("Config directory is busy; nothing saved.".into());
+        }
+        self.check_unchanged()?;
+        let text = self.patched(&self.patches);
+        let cfg = parse_watch_config(&text, &self.path)?;
+        let path = self
+            .path
+            .with_extension(format!("watch.{}.tmp", std::process::id()));
+        let mut file = File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|e| format!("Cannot create sibling temp file: {e}"))?;
+        let replace = (|| {
+            let new_meta = file
+                .metadata()
+                .map_err(|e| format!("Cannot inspect temp file: {e}"))?;
+            if new_meta.gid() != self.identity.gid() {
+                return Err("Cannot preserve config group ownership; nothing saved.".into());
+            }
+            file.set_permissions(fs::Permissions::from_mode(self.identity.mode() & 0o777))
+                .and_then(|()| file.write_all(text.as_bytes()))
+                .and_then(|()| file.sync_all())
+                .map_err(|e| format!("Cannot write temp config: {e}"))?;
+            self.check_unchanged()?;
+            fs::rename(&path, &self.path)
+                .map_err(|e| format!("Cannot atomically replace config: {e}"))
+        })();
+        if replace.is_err() {
+            let _ = fs::remove_file(&path);
+        }
+        replace?;
+        Ok(cfg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

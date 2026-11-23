@@ -65,6 +65,15 @@ pub(crate) fn watch_terminal_width() -> usize {
     terminal_width_with_minimum(10)
 }
 
+pub(crate) fn watch_terminal_height() -> usize {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 {
+        usize::from(ws.ws_row)
+    } else {
+        0
+    }
+}
+
 fn terminal_width_with_minimum(minimum: usize) -> usize {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0

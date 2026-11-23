@@ -148,11 +148,21 @@ This installs `~/.local/bin/keep-ram-clean`, creates `~/.config/keep-ram-clean/c
 
 ## Usage
 
-In `status --watch`, swap devices are shown as a table, with stacked entries on
-narrow terminals. Press `s` for read-only Settings, or start there with
-`keep-ram-clean status --watch --view config`. Settings shows the file or
-built-in defaults used by this Watch process, not the daemon's active settings.
-Press `s` or Esc to return to Watch, or `q` to quit.
+In `status --watch`, memory, swap devices, pressure, consumers, and cleanup
+activity are shown in tables that stack when columns are too narrow. In a short
+interactive terminal, use `j`/`k` when the scroll footer appears.
+Press `s` for Settings or start there with
+`keep-ram-clean status --watch --view config`. Settings shows this Watch
+process's configuration, not the daemon's in-memory settings.
+
+To edit an existing configuration you own, press `e`, select a row with
+`j`/`k`, and press Enter. Enter stages each new value. Use `w` to review
+the exact file and original/proposed values. Visit each change with `j`, then
+press Enter to save the batch.
+Esc cancels the current step; discarding the draft or quitting never saves.
+Built-in defaults, symlinks, and files you do not own are not editable here.
+Save does not signal or reload the daemon. A later reload or restart can use
+the saved values and change when and how cleanup runs.
 
 ```bash
 # Check live RAM, PSI, swap, tmpfs, auto-clean activity, and daemon status
