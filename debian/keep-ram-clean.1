@@ -1,4 +1,4 @@
-.TH KEEP-RAM-CLEAN 1 "November 2026" "keep-ram-clean 2.2.0" "User Commands"
+.TH KEEP-RAM-CLEAN 1 "November 2026" "keep-ram-clean 2.3.1" "User Commands"
 .SH NAME
 keep-ram-clean \- configurable Linux RAM, tmpfs, swap, and memory-pressure management daemon and CLI
 .SH SYNOPSIS
@@ -13,12 +13,18 @@ safe, modular memory reclamation actions only when user-configured thresholds,
 intervals, or cron schedules are triggered.
 .SH COMMANDS
 .TP
-.B status \fR[\fB\-\-watch\fR] [\fB\-\-interval\fR \fISECS\fR] [\fB\-\-top\fR \fIN\fR] [\fB\-\-json\fR]
-Display a full-width dashboard of RAM, swap, tmpfs mounts, PSI contention, top memory
+.B status \fR[\fB\-\-watch\fR [\fB\-\-view config\fR]] [\fB\-\-interval\fR \fISECS\fR] [\fB\-\-top\fR \fIN\fR] [\fB\-\-json\fR]
+Display a dashboard of RAM, swap, tmpfs mounts, PSI contention, top memory
 consumers, auto-clean triggers, and recent cleanup activity. In \fB\-\-watch\fR mode,
 interactive hotkeys allow triggering cleanups (\fBc\fR), adjusting RAM trigger
 thresholds (\fB+\fR/\fB\-\fR), toggling desktop notifications (\fBn\fR), reloading
 config (\fBr\fR), and quitting (\fBq\fR).
+Press \fBs\fR to open Settings, or start there with \fB\-\-view config\fR.
+Settings reports the current file or built-in values and previews a physical-RAM
+preset for the available-RAM floor. In an editable file, \fBe\fR opens the
+editor, \fBj\fR/\fBk\fR select a field, and Enter stages a manually entered
+value. On Available floor, \fBp\fR stages the preset. Use \fBw\fR to review
+every change, then Enter to save. Saving does not signal or reload the daemon.
 .TP
 .B run \fR[\fB\-\-dry\-run\fR] [\fB\-\-only\fR \fISTEPS\fR] [\fB\-\-critical\fR] [\fB\-\-json\fR] [\fB\-v\fR]
 Execute a one-shot cleanup immediately. Valid steps: \fBtmpfs\fR, \fBwatchdog\fR,

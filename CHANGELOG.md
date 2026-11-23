@@ -2,6 +2,20 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.3.1] - 2026-11-23
+
+### Changed
+- Restyled the Watch dashboard with compact, responsive tables for resource
+  usage, swap devices, pressure, top consumers, and cleanup activity.
+
+### Added
+- Watch Settings (`s` or `status --watch --view config`) shows the file or
+  built-in source of each editable value. Stage exact edits, review them, and
+  save atomically without reloading the daemon.
+- Settings previews a physical-RAM-based Available floor preset. It does not
+  replace explicit values unless selected, reviewed, and saved. Runtime defaults
+  and daemon behavior are unchanged.
+
 ## [2.3.0] - 2026-11-23
 
 ### Added
