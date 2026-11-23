@@ -1,7 +1,7 @@
 //! Read-only formatter for information collected by the original Watch loop.
 use crate::daemon::DaemonState;
 use crate::metrics::{ProcessInfo, SystemSnapshot};
-use crate::ui::{fmt_mib, fmt_mib_f64, gauge_bar, psi_badge, Palette};
+use crate::ui::{fmt_mib, fmt_mib_f64, psi_badge, Palette};
 use crate::watch_layout::{escape_controls, Layout};
 use crate::Config;
 
@@ -14,26 +14,12 @@ pub(crate) struct Report<'a> {
     pub(crate) interval: u64,
 }
 
-/// Use eighth-cell increments so everyday low-RSS processes don't all look empty.
-/// The bars compare only the listed processes; percentages remain absolute.
-fn ram_share(rss: f64, total_mib: u64, largest_rss: f64, p: &Palette) -> String {
+/// A single-row six-cell track with strong end caps in color and plain terminals.
+fn outlined_meter(ratio: f64, color: &str, p: &Palette) -> String {
     const WIDTH: usize = 6;
     const FRACTIONS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
-    let percent = if total_mib == 0 || !rss.is_finite() || rss < 0.0 {
-        "n/a".into()
-    } else {
-        let pct = rss / total_mib as f64 * 100.0;
-        if pct > 0.0 && pct < 0.005 {
-            "<0.01%".into()
-        } else if pct < 1.0 && pct > 0.0 {
-            format!("{pct:.2}%")
-        } else {
-            format!("{pct:.1}%")
-        }
-    };
-    let filled = if rss.is_finite() && largest_rss.is_finite() && rss > 0.0 && largest_rss > 0.0 {
-        // The square root spreads tiny shares out even when the top process is huge.
-        ((rss / largest_rss).clamp(0.0, 1.0).sqrt() * (WIDTH * 8) as f64)
+    let filled = if ratio.is_finite() && ratio > 0.0 {
+        (ratio.clamp(0.0, 1.0) * (WIDTH * 8) as f64)
             .round()
             .max(1.0) as usize
     } else {
@@ -46,10 +32,33 @@ fn ram_share(rss: f64, total_mib: u64, largest_rss: f64, p: &Palette) -> String 
         active.push(FRACTIONS[partial]);
     }
     let empty = "·".repeat(WIDTH - full - usize::from(partial > 0));
-    format!(
-        "{percent:>6} {}{active}{}{}{empty}{}",
-        p.cyan, p.nc, p.dim, p.nc
-    )
+    let bold = p.bold;
+    let reset = p.nc;
+    let dim = p.dim;
+    format!("{bold}[{reset}{color}{active}{reset}{dim}{empty}{reset}{bold}]{reset}")
+}
+
+/// The bars compare only the listed processes; percentages remain absolute.
+fn ram_share(rss: f64, total_mib: u64, largest_rss: f64, p: &Palette) -> String {
+    let percent = if total_mib == 0 || !rss.is_finite() || rss < 0.0 {
+        "n/a".into()
+    } else {
+        let pct = rss / total_mib as f64 * 100.0;
+        if pct > 0.0 && pct < 0.005 {
+            "<0.01%".into()
+        } else if pct < 1.0 && pct > 0.0 {
+            format!("{pct:.2}%")
+        } else {
+            format!("{pct:.1}%")
+        }
+    };
+    let ratio = if rss.is_finite() && largest_rss.is_finite() && rss > 0.0 && largest_rss > 0.0 {
+        // The square root spreads tiny shares out even when the top process is huge.
+        (rss / largest_rss).clamp(0.0, 1.0).sqrt()
+    } else {
+        0.0
+    };
+    format!("{percent:>5} {}", outlined_meter(ratio, p.cyan, p))
 }
 
 impl Report<'_> {
@@ -81,11 +90,9 @@ impl Report<'_> {
 
         let utilization = |value, warning, critical| {
             let color = p.severity_color(value, warning, critical);
-            format!(
-                "{}{color} {value:.1}%{}",
-                gauge_bar(value, 7, warning, critical, p),
-                p.nc
-            )
+            let reset = p.nc;
+            let bar = outlined_meter(value / 100.0, color, p);
+            format!("{color}{value:>5.1}%{reset} {bar}")
         };
         let ram = if t.ram_used_percent > 0.0 {
             t.ram_used_percent
@@ -425,6 +432,31 @@ mod tests {
     use crate::metrics::{MemoryInfo, PsiMemory, SwapDevice, TmpfsMount};
 
     #[test]
+    fn outlined_meter_keeps_one_fixed_width_row_in_every_fill_state() {
+        let p = Palette {
+            color: false,
+            bold: "",
+            dim: "",
+            green: "",
+            cyan: "",
+            yellow: "",
+            red: "",
+            nc: "",
+        };
+        for (ratio, expected) in [
+            (0.0, "[······]"),
+            (1.0 / 48.0, "[▏·····]"),
+            (0.5, "[███···]"),
+            (1.0, "[██████]"),
+        ] {
+            let bar = outlined_meter(ratio, p.cyan, &p);
+            assert_eq!(bar, expected);
+            assert_eq!(bar.chars().count(), 8);
+            assert!(!bar.contains('\n'));
+        }
+    }
+
+    #[test]
     fn relative_bars_distinguish_small_through_high_rss_without_changing_percentages() {
         let p = Palette {
             color: false,
@@ -449,13 +481,14 @@ mod tests {
             let rendered = ram_share(rss, 8192, 4096.0, &p);
             let (number, bar) = rendered.trim().split_once(' ').unwrap();
             assert_eq!(number, expected);
-            assert_eq!(bar.chars().count(), 6);
+            assert!(bar.starts_with('[') && bar.ends_with(']'));
+            assert_eq!(bar.chars().count(), 8);
             bars.push(bar.to_owned());
         }
         let unique = bars.iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), cases.len());
-        assert_eq!(bars[0], "······");
-        assert_eq!(bars[cases.len() - 1], "██████");
+        assert_eq!(bars[0], "[······]");
+        assert_eq!(bars[cases.len() - 1], "[██████]");
         assert!(ram_share(41.0, 0, 4096.0, &p).contains("n/a"));
         assert!(ram_share(0.1, 8192, 4096.0, &p).contains("<0.01%"));
     }

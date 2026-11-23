@@ -508,7 +508,8 @@ impl<'a> Layout<'a> {
             .iter()
             .map(|&header| match header {
                 "USED / TOTAL" | "AMOUNTS" => 18, // fit two numbers with units
-                "USAGE" | "RAM SHARE" => 14,      // fit the mini gauge and percentage
+                "USAGE" if !self.framed => 15,    // percentage + eight-cell outlined track
+                "USAGE" | "RAM SHARE" => 14,
                 "WHEN / CHANGE" => 27, // keep time/deltas together instead of starving this column
                 "PID" if !self.framed => 5,
                 "PROCESS" if !self.framed => 12,
