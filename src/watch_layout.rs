@@ -103,15 +103,27 @@ impl<'a> Layout<'a> {
             format!("{}│{} {row}{pad} {}│{}", p.cyan, p.nc, p.cyan, p.nc)
         };
         let mut output = Vec::new();
-        for (title, rows) in groups {
+        for (index, (title, rows)) in groups.into_iter().enumerate() {
+            // One boundary acts as the end of the previous section and the
+            // labeled beginning of the next; both keep their side borders.
+            let (left, right) = if index == 0 {
+                ('╭', '╮')
+            } else {
+                ('├', '┤')
+            };
             if self.width(title) + 2 <= area {
                 let fill = "─".repeat(inner - self.width(title) - 4);
                 output.push(format!(
-                    "{}╭── {}{title}{} {}{fill}╮{}",
+                    "{}{left}── {}{title}{} {}{fill}{right}{}",
                     p.cyan, p.bold, p.nc, p.cyan, p.nc
                 ));
             } else {
-                output.push(format!("{}╭{}╮{}", p.cyan, "─".repeat(inner), p.nc));
+                output.push(format!(
+                    "{}{left}{}{right}{}",
+                    p.cyan,
+                    "─".repeat(inner),
+                    p.nc
+                ));
                 output.extend(
                     self.text(&format!("{}{title}{}", p.bold, p.nc), area - 2)
                         .iter()
@@ -119,8 +131,8 @@ impl<'a> Layout<'a> {
                 );
             }
             output.extend(rows.iter().map(|row| line(row)));
-            output.push(format!("{}╰{}╯{}", p.cyan, "─".repeat(inner), p.nc));
         }
+        output.push(format!("{}╰{}╯{}", p.cyan, "─".repeat(inner), p.nc));
         output
     }
 
@@ -528,6 +540,25 @@ impl<'a> Layout<'a> {
         true
     }
 
+    /// Use the header rule for the first meter's otherwise blank top row.
+    /// Keep the cap visible and leave all header column junctions intact.
+    fn inset_meter_in_header(&self, rule: &mut String, top: &str) -> bool {
+        const TOP: &str = "╭──────╮";
+        let Some(top_at) = top.rfind(TOP) else {
+            return false;
+        };
+        let column = self.width(&top[..top_at]);
+        let mut edges = rule.char_indices().map(|(i, _)| i).chain([rule.len()]);
+        let (Some(start), Some(end)) = (edges.nth(column), edges.nth(7)) else {
+            return false;
+        };
+        if !rule[start..end].chars().all(|ch| ch == '─') {
+            return false;
+        }
+        rule.replace_range(start..end, TOP);
+        true
+    }
+
     pub(crate) fn table(
         &self,
         title: &str,
@@ -675,13 +706,19 @@ impl<'a> Layout<'a> {
                 );
             }
             let meters = headers.iter().any(|header| is_meter(header));
-            for row in rows {
+            for (index, row) in rows.iter().enumerate() {
                 let block = wrapped(row, false);
                 let join = meters
                     && lines
                         .last_mut()
                         .zip(block.first())
-                        .is_some_and(|(previous, next)| self.shared_meter_rail(previous, next));
+                        .is_some_and(|(previous, next)| {
+                            if index == 0 {
+                                self.inset_meter_in_header(previous, next)
+                            } else {
+                                self.shared_meter_rail(previous, next)
+                            }
+                        });
                 lines.extend(block.into_iter().skip(usize::from(join)));
             }
         } else {
@@ -1122,6 +1159,21 @@ mod tests {
     }
 
     #[test]
+    fn first_meter_rail_can_share_the_header_rule_without_losing_the_divider() {
+        for color in [false, true] {
+            let p = palette(color);
+            let layout = Layout::board(&p);
+            let top = format!("       {}╭──────╮{}", p.dim, p.nc);
+            let mut rule = "───┼───────────".to_owned();
+            assert!(layout.inset_meter_in_header(&mut rule, &top));
+            assert_eq!(rule, "───┼───╭──────╮");
+            let mut intersects = "───┼────┼──────".to_owned();
+            assert!(!layout.inset_meter_in_header(&mut intersects, &top));
+            assert_eq!(intersects, "───┼────┼──────");
+        }
+    }
+
+    #[test]
     fn board_groups_have_matching_edges_and_preserve_wrapped_text() {
         for color in [false, true] {
             let p = palette(color);
@@ -1146,14 +1198,21 @@ mod tests {
                         .iter()
                         .filter(|r| r.starts_with('╭') && r.ends_with('╮'))
                         .count(),
-                    3
+                    1
                 );
                 assert_eq!(
                     clean
                         .iter()
                         .filter(|r| r.starts_with('╰') && r.ends_with('╯'))
                         .count(),
-                    3
+                    1
+                );
+                assert_eq!(
+                    clean
+                        .iter()
+                        .filter(|r| r.starts_with('├') && r.ends_with('┤'))
+                        .count(),
+                    2
                 );
                 let body = clean
                     .iter()
