@@ -1,7 +1,7 @@
 //! Keyboard editor nested in Watch Settings. Its only write is an explicit transaction.
 use crate::{config::WatchConfigDraft, Config};
 
-const FIELDS: [(&str, &str); 19] = [
+pub(crate) const FIELDS: [(&str, &str); 19] = [
     ("ram-percent", "%"),
     ("min-avail-mb", "MiB"),
     ("swap-percent", "%"),
@@ -23,7 +23,55 @@ const FIELDS: [(&str, &str); 19] = [
     ("tmpfs-age", "min"),
 ];
 
-fn values(c: &Config) -> [String; FIELDS.len()] {
+pub(crate) const LABELS: [&str; FIELDS.len()] = [
+    "RAM used",
+    "Available floor",
+    "Swap used %",
+    "Swap used MiB",
+    "tmpfs used",
+    "PSI some avg10",
+    "PSI full avg10",
+    "Cooldown",
+    "Poll interval",
+    "Re-arm margin",
+    "Periodic interval",
+    "CPU load limit",
+    "Desktop notices",
+    "Free before notice",
+    "Critical-only notice",
+    "Drop caches",
+    "Drop critical-only",
+    "Cgroup reclaim",
+    "Minimum tmpfs age",
+];
+
+pub(crate) const GROUPS: [(&str, &[usize]); 4] = [
+    ("PRESSURE THRESHOLDS", &[0, 1, 2, 3, 4, 5, 6]),
+    ("NOTIFICATIONS", &[12, 13, 14]),
+    ("TIMING & LOAD", &[7, 8, 9, 10, 11]),
+    ("CLEANUP ACTIONS", &[15, 16, 17, 18]),
+];
+
+const GRID_ORDER: [usize; FIELDS.len()] = [
+    0, 1, 2, 3, 4, 5, 6, 12, 13, 14, 7, 8, 9, 10, 11, 15, 16, 17, 18,
+];
+
+pub(crate) fn display_value(index: usize, raw: &str) -> String {
+    match FIELDS[index].1 {
+        "%" | "% avg10" => format!("{raw}%"),
+        "true/false" => {
+            if raw == "true" {
+                "on".into()
+            } else {
+                "off".into()
+            }
+        }
+        "level 0-3" => format!("level {raw}"),
+        unit => format!("{raw} {unit}"),
+    }
+}
+
+pub(crate) fn values(c: &Config) -> [String; FIELDS.len()] {
     let t = &c.triggers;
     [
         t.ram_used_percent.to_string(),
@@ -97,8 +145,15 @@ impl Editor {
     pub(crate) fn input(&mut self, key: u8) -> Outcome {
         match self.mode {
             Mode::Browse => match key {
-                b'j' => self.selected = (self.selected + 1).min(FIELDS.len() - 1),
-                b'k' => self.selected = self.selected.saturating_sub(1),
+                b'j' | b'k' => {
+                    let pos = GRID_ORDER.iter().position(|&i| i == self.selected).unwrap();
+                    let next = if key == b'j' {
+                        (pos + 1).min(FIELDS.len() - 1)
+                    } else {
+                        pos.saturating_sub(1)
+                    };
+                    self.selected = GRID_ORDER[next];
+                }
                 b'\r' | b'\n' => {
                     self.mode = Mode::Value;
                     self.buffer.clear();
@@ -161,7 +216,15 @@ impl Editor {
         Outcome::Continue
     }
 
-    pub(crate) fn view(&self, width: usize) -> (Vec<Vec<String>>, Vec<String>) {
+    pub(crate) fn selecting(&self) -> Option<usize> {
+        (self.mode != Mode::Confirm).then_some(self.selected)
+    }
+
+    pub(crate) fn editing_value(&self) -> Option<&str> {
+        (self.mode == Mode::Value).then_some(self.buffer.as_str())
+    }
+
+    pub(crate) fn review(&self) -> (Vec<Vec<String>>, Vec<String>) {
         let before = values(&self.draft.original);
         let after = values(&self.draft.proposed);
         let mut rows = Vec::new();
@@ -175,26 +238,7 @@ impl Editor {
                 ]);
                 vec!["Type the proposed value. Enter stages; Esc cancels this input.".into()]
             }
-            Mode::Browse => {
-                let count = if width < 60 { 3 } else { 7 };
-                let start = self
-                    .selected
-                    .saturating_sub(count / 2)
-                    .min(FIELDS.len() - count);
-                for i in start..start + count {
-                    let arrow = if i == self.selected { "> " } else { "" };
-                    rows.push(vec![
-                        format!("{arrow}{}", FIELDS[i].0),
-                        before[i].clone(),
-                        after[i].clone(),
-                        FIELDS[i].1.into(),
-                    ]);
-                }
-                vec![
-                    "j/k Select | Enter Edit field | w Review save | Esc Discard draft | q Quit"
-                        .into(),
-                ]
-            }
+            Mode::Browse => unreachable!("browse has its own compact grid"),
             Mode::Confirm => {
                 let changed = self.changes();
                 let i = changed[self.review_page];
@@ -270,10 +314,10 @@ mod tests {
         editor.draft.stage("ram-percent", "85").unwrap();
         editor.draft.stage("notify", "true").unwrap();
         editor.input(b'w');
-        assert_eq!(editor.view(80).0.len(), 1);
+        assert_eq!(editor.review().0.len(), 1);
         assert!(matches!(editor.input(b'\r'), Outcome::Continue));
         editor.input(b'j');
-        assert!(editor.view(80).1[0].contains("2/2"));
+        assert!(editor.review().1[0].contains("2/2"));
         assert_eq!(fs::read_to_string(&dest).unwrap(), base);
         assert!(matches!(editor.input(b'\r'), Outcome::Save));
         let saved = editor.draft.save().unwrap();

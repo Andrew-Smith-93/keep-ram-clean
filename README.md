@@ -154,6 +154,9 @@ interactive terminal, use `j`/`k` when the scroll footer appears.
 Press `s` for Settings or start there with
 `keep-ram-clean status --watch --view config`. Settings shows this Watch
 process's configuration, not the daemon's in-memory settings.
+Read and edit views use the same two-column grid on normal terminals. On
+smaller screens, use `[` and `]` to move between pages. In the editor, `>`
+marks the selected field and `*` marks a staged change.
 
 To edit an existing configuration you own, press `e`, select a row with
 `j`/`k`, and press Enter. Enter stages each new value. Use `w` to review

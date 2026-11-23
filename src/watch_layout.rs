@@ -5,6 +5,27 @@ unsafe extern "C" {
     fn wcwidth(ch: libc::wchar_t) -> libc::c_int;
 }
 
+#[derive(Default)]
+pub(crate) struct SettingsPage {
+    page: usize,
+    manual: bool,
+}
+
+impl SettingsPage {
+    pub(crate) fn step(&mut self, forward: bool) {
+        self.manual = true;
+        self.page = if forward {
+            self.page.saturating_add(1)
+        } else {
+            self.page.saturating_sub(1)
+        };
+    }
+
+    pub(crate) fn follow(&mut self) {
+        self.manual = false;
+    }
+}
+
 /// Use the UTF-8 width table on this thread without changing the process locale.
 pub(crate) struct Layout<'a> {
     p: &'a Palette,
@@ -208,6 +229,7 @@ impl<'a> Layout<'a> {
         rows
     }
 
+    #[cfg(test)]
     pub(crate) fn banner(
         &self,
         title: &str,
@@ -435,16 +457,6 @@ impl<'a> Layout<'a> {
             },
             frame_width,
         )
-    }
-
-    /// Lay out two independently wrapped tables without repeating padding.
-    pub(crate) fn pair(
-        &self,
-        width: usize,
-        left: impl FnOnce(usize) -> Vec<String>,
-        right: impl FnOnce(usize) -> Vec<String>,
-    ) -> Vec<String> {
-        self.pair_at(width, (width - 1) / 2, left, right)
     }
 
     pub(crate) fn pair_at(
@@ -706,162 +718,236 @@ impl<'a> Layout<'a> {
         )
     }
 
-    pub(crate) fn editor(&self, editor: &crate::watch_editor::Editor, width: usize) -> Vec<String> {
-        let (table, hints) = editor.view(width);
-        let mut lines = self.banner(
-            "WATCH SETTINGS / EDITOR",
-            &format!(
-                "Target: {}",
-                escape_controls(&editor.draft.path.display().to_string())
-            ),
-            "NO AUTO-SAVE",
-            self.p.yellow,
-            width.min(96),
-        );
-        lines.extend(self.table(
-            "STAGED SETTINGS",
-            &["KEY", "ORIGINAL", "PROPOSED", "UNIT"],
-            &table,
-            width,
-        ));
-        if !editor.note.is_empty() {
-            lines.extend(self.text(&escape_controls(&editor.note), width));
+    fn settings_grid(
+        &self,
+        cfg: &crate::Config,
+        editor: Option<&crate::watch_editor::Editor>,
+        width: usize,
+    ) -> Vec<String> {
+        use crate::watch_editor::{display_value, values, GROUPS, LABELS};
+        let p = self.p;
+        let value = values(editor.map_or(cfg, |e| &e.draft.proposed));
+        let original = editor.map(|e| values(&e.draft.original));
+        let selected = editor.and_then(crate::watch_editor::Editor::selecting);
+        let lane = |groups: &[(&str, &[usize])], w| {
+            let label_width = groups
+                .iter()
+                .flat_map(|(_, ids)| *ids)
+                .map(|&i| self.width(LABELS[i]))
+                .max()
+                .unwrap_or(0);
+            let mut rows = Vec::new();
+            for (section, ids) in groups {
+                rows.extend(self.text(&format!("{}{section}{}", p.bold, p.nc), w));
+                for &id in *ids {
+                    let focused = Some(id) == selected;
+                    let changed = original
+                        .as_ref()
+                        .is_some_and(|previous| previous[id] != value[id]);
+                    let arrow = if focused { '>' } else { ' ' };
+                    let star = if changed { '*' } else { ' ' };
+                    let color = if focused {
+                        p.cyan
+                    } else if changed {
+                        p.yellow
+                    } else {
+                        ""
+                    };
+                    let label = LABELS[id];
+                    let value = display_value(id, &value[id]);
+                    rows.extend(self.text(
+                        &format!(
+                            "{color}{arrow}{star} {label:<label_width$} │ {value}{}",
+                            p.nc
+                        ),
+                        w,
+                    ));
+                }
+            }
+            rows
+        };
+        if width >= 62 {
+            let left_width = (width - 3) / 2;
+            let right_width = width - 3 - left_width;
+            let mut left = lane(&GROUPS[..2], left_width);
+            let mut right = lane(&GROUPS[2..], right_width);
+            let lines = left.len().max(right.len());
+            left.resize(lines, String::new());
+            right.resize(lines, String::new());
+            left.into_iter()
+                .zip(right)
+                .map(|(left, right)| match (left.is_empty(), right.is_empty()) {
+                    (_, true) => left,
+                    _ => format!(
+                        "{left}{} │ {right}",
+                        " ".repeat(left_width.saturating_sub(self.width(&left)))
+                    ),
+                })
+                .collect()
+        } else {
+            lane(&GROUPS, width)
         }
-        for hint in hints {
-            lines.extend(self.text(&hint, width));
+    }
+
+    fn settings_page(
+        &self,
+        mut rows: Vec<String>,
+        width: usize,
+        height: usize,
+        page: &mut SettingsPage,
+        focus: Option<&str>,
+    ) -> Vec<String> {
+        if height < 5 || rows.len() < height {
+            page.page = 0;
+            page.manual = false;
+            return rows;
         }
-        lines
+        let room = height - 3;
+        let title = rows.remove(0);
+        let pages = rows.len().div_ceil(room);
+        if !page.manual {
+            page.page = focus
+                .and_then(|anchor| {
+                    rows.iter().position(|row| {
+                        if anchor == ">" {
+                            row.starts_with('>')
+                                || row.contains("│ >")
+                                || row.contains("\x1b[0;36m>")
+                        } else {
+                            row.starts_with(anchor) || row.contains(anchor)
+                        }
+                    })
+                })
+                .map(|i| i / room)
+                .unwrap_or_default();
+        }
+        page.page = page.page.min(pages - 1);
+        let mut result = vec![title];
+        result.extend(rows.into_iter().skip(page.page * room).take(room));
+        let footer = if width >= 27 {
+            format!("Page {}/{}  [ / ]  Prev/Next", page.page + 1, pages)
+        } else {
+            format!("[ ] {}/{}", page.page + 1, pages)
+        };
+        result.extend(self.text(&footer, width));
+        result
     }
 
     pub(crate) fn settings(
         &self,
         cfg: &crate::Config,
-        width: usize,
+        dimensions: (usize, usize),
         interactive: bool,
+        editor: Option<&crate::watch_editor::Editor>,
+        message: &str,
+        page: &mut SettingsPage,
     ) -> Vec<String> {
-        use crate::ui::fmt_mib;
-        let source = cfg.source_path.as_ref().map_or_else(
-            || "built-in defaults".into(),
-            |path| escape_controls(&path.display().to_string()),
-        );
-        let mut rows = self.banner(
-            "WATCH SETTINGS",
-            &format!("Source: {source}"),
-            "READ ONLY UNTIL EDIT",
-            self.p.cyan,
-            width.min(96),
-        );
-        let t = &cfg.triggers;
-        let n = &cfg.notifications;
-        let toggle = |enabled| if enabled { "on" } else { "off" };
-        let pct = |v: f64| {
-            if v > 0.0 {
-                format!("{v}%")
-            } else {
-                "off".into()
-            }
-        };
-        let amount = |v: u64| if v > 0 { fmt_mib(v) } else { "off".into() };
-        let triggers = [
-            vec!["RAM used".into(), pct(t.ram_used_percent)],
-            vec!["Available floor".into(), amount(t.min_available_mb)],
-            vec![
-                "Swap used % / MiB".into(),
-                format!("{} / {}", pct(t.swap_used_percent), amount(t.swap_used_mb)),
-            ],
-            vec!["Tmpfs used".into(), pct(t.tmpfs_used_percent)],
-            vec![
-                "PSI some / full (avg10)".into(),
-                format!("{} / {}", pct(t.psi_some_avg10), pct(t.psi_full_avg10)),
-            ],
-            vec![
-                "Poll / cooldown / rearm".into(),
-                format!(
-                    "{}s / {}s / {} pp",
-                    t.poll_interval_seconds, t.cooldown_seconds, t.hysteresis_percent
+        let (width, height) = dimensions;
+        let p = self.p;
+        if let Some(editor) = editor.filter(|editor| editor.selecting().is_none()) {
+            let (table, hints) = editor.review();
+            let mut lines = self.text("WATCH SETTINGS  │  REVIEW  │  NO AUTO-SAVE", width);
+            lines.extend(self.text(
+                &format!(
+                    "Target: {}",
+                    escape_controls(&editor.draft.path.display().to_string())
                 ),
-            ],
-            vec![
-                "Interval / schedules".into(),
-                format!(
-                    "{} / {}",
-                    if t.interval_minutes == 0 {
-                        "off".into()
-                    } else {
-                        format!("{}m", t.interval_minutes)
-                    },
-                    if t.schedules.is_empty() {
-                        "none".into()
-                    } else {
-                        escape_controls(&t.schedules.join(", "))
-                    }
-                ),
-            ],
-        ];
-        let actions = [
-            vec![
-                "Kernel / drop caches".into(),
-                format!(
-                    "{} / level {}{}",
-                    toggle(cfg.kernel.enabled),
-                    cfg.kernel.drop_caches_level,
-                    if cfg.kernel.drop_caches_on_critical_only {
-                        " (critical only)"
-                    } else {
-                        ""
-                    }
-                ),
-            ],
-            vec![
-                "Swap / tmpfs".into(),
-                format!(
-                    "{} / {}",
-                    toggle(cfg.swap.enabled),
-                    toggle(cfg.tmpfs.enabled)
-                ),
-            ],
-            vec![
-                "User caches / watchdog".into(),
-                format!(
-                    "{} / {}",
-                    toggle(cfg.user_caches.enabled),
-                    toggle(cfg.watchdog.enabled)
-                ),
-            ],
-            vec![
-                "Notifications".into(),
-                format!(
-                    "{} (minimum {} MiB{})",
-                    toggle(n.enabled),
-                    n.min_freed_mb,
-                    if n.on_critical_only {
-                        ", critical only"
-                    } else {
-                        ""
-                    }
-                ),
-            ],
-            vec!["Logging".into(), escape_controls(&cfg.logging.level)],
-        ];
-        let when = |w| self.table("WHEN TO ACT", &["SETTING", "VALUE"], &triggers, w);
-        let actions = |w| self.table("WHAT TO DO", &["SETTING", "VALUE"], &actions, w);
-        if width >= 100 {
-            rows.extend(self.pair(width, when, actions));
-        } else {
-            rows.extend(when(width));
-            rows.extend(actions(width));
-        }
-        rows.extend(self.text(
-            "Values used by this Watch, not the daemon's loaded settings.",
-            width,
-        ));
-        if interactive {
-            rows.extend(self.text(
-                "[e] Edit existing config  |  [s] or Esc Back to Watch  |  [q] Quit",
                 width,
             ));
+            lines.extend(self.table(
+                "STAGED SETTINGS",
+                &["KEY", "ORIGINAL", "PROPOSED", "UNIT"],
+                &table,
+                width,
+            ));
+            if !editor.note.is_empty() {
+                lines.extend(self.text(&escape_controls(&editor.note), width));
+            }
+            for hint in hints {
+                lines.extend(self.text(&hint, width));
+            }
+            return self.settings_page(lines, width, height, page, Some("Review "));
         }
-        rows
+
+        let source = editor
+            .map(|e| e.draft.path.as_path())
+            .or(cfg.source_path.as_deref())
+            .map_or_else(
+                || "built-in defaults".into(),
+                |path| escape_controls(&path.display().to_string()),
+            );
+        let badge = if editor.is_some() {
+            "NO AUTO-SAVE"
+        } else {
+            "READ ONLY"
+        };
+        let mut rows = self.text(
+            &format!(
+                "{}WATCH SETTINGS{}  │  {badge}  │  not daemon runtime",
+                p.bold, p.nc
+            ),
+            width,
+        );
+        rows.extend(self.text(&format!("Source: {source}"), width));
+        rows.extend(self.settings_grid(cfg, editor, width));
+        let on = |v| if v { "on" } else { "off" };
+        rows.extend(self.text(
+            &format!(
+                "Enabled: kernel {} · swap {} · tmpfs {} · caches {} · watchdog {}",
+                on(cfg.kernel.enabled),
+                on(cfg.swap.enabled),
+                on(cfg.tmpfs.enabled),
+                on(cfg.user_caches.enabled),
+                on(cfg.watchdog.enabled)
+            ),
+            width,
+        ));
+        let schedules = if cfg.triggers.schedules.is_empty() {
+            "none".into()
+        } else {
+            escape_controls(&cfg.triggers.schedules.join(", "))
+        };
+        rows.extend(self.text(
+            &format!(
+                "Schedules: {schedules}  │  Logging: {}",
+                escape_controls(&cfg.logging.level)
+            ),
+            width,
+        ));
+        let focus = if let Some(editor) = editor {
+            if !editor.note.is_empty() {
+                rows.extend(self.text(&escape_controls(&editor.note), width));
+            }
+            if let (Some(input), Some(index)) = (editor.editing_value(), editor.selecting()) {
+                use crate::watch_editor::{FIELDS, LABELS};
+                rows.extend(self.text(
+                    &format!(
+                        "Editing: {} ({}) = {}",
+                        LABELS[index],
+                        FIELDS[index].1,
+                        escape_controls(input)
+                    ),
+                    width,
+                ));
+                rows.extend(self.text("Enter stages; Esc cancels this input.", width));
+                Some("Editing:")
+            } else {
+                rows.extend(self.text(
+                    "j/k Select  Enter Edit  w Review  Esc Discard  q Quit  * Staged",
+                    width,
+                ));
+                Some(">")
+            }
+        } else {
+            if !message.is_empty() {
+                rows.extend(self.text(&escape_controls(message), width));
+            }
+            if interactive {
+                rows.extend(self.text("[e] Edit  [s]/Esc Watch  [q] Quit", width));
+            }
+            None
+        };
+        self.settings_page(rows, width, height, page, focus)
     }
 
     pub(crate) fn text(&self, line: &str, width: usize) -> Vec<String> {
@@ -1100,7 +1186,14 @@ mod tests {
         let p = palette(false);
         let layout = Layout::new(&p);
         for width in [32, 80, 120] {
-            let rows = layout.settings(&cfg, width, true);
+            let rows = layout.settings(
+                &cfg,
+                (width, 0),
+                true,
+                None,
+                "",
+                &mut SettingsPage::default(),
+            );
             assert!(rows.iter().all(|line| layout.width(line) <= width));
             let values = unpack(&layout, &rows.join(""))
                 .replace(':', "")
@@ -1110,15 +1203,18 @@ mod tests {
                 "READONLY",
                 "SOURCE-END.toml",
                 "RAMused87%",
-                "Notificationson",
-                "[s]orEscBacktoWatch",
+                "Desktopnoticeson",
+                "[s]/EscWatch",
                 "[q]Quit",
             ] {
                 assert!(values.contains(item), "{item}: {values}");
             }
             assert!(!values.contains('…'));
         }
-        assert!(!layout.settings(&cfg, 80, false).join("").contains("[q]"));
+        assert!(!layout
+            .settings(&cfg, (80, 0), false, None, "", &mut SettingsPage::default())
+            .join("")
+            .contains("[q]"));
     }
 
     #[test]

@@ -669,15 +669,18 @@ fn watch_input(view: WatchView, key: u8) -> WatchInput {
     }
 }
 
-fn render_watch_settings(cfg: &Config, p: &Palette, editor: Option<&watch_editor::Editor>, message: &str) {
+fn render_watch_settings(
+    cfg: &Config,
+    p: &Palette,
+    editor: Option<&watch_editor::Editor>,
+    message: &str,
+    page: &mut watch_layout::SettingsPage,
+) {
     let layout = watch_layout::Layout::new(p);
     let width = ui::watch_terminal_width();
-    if let Some(editor) = editor {
-        layout.print(layout.editor(editor, width));
-    } else {
-        layout.print(layout.settings(cfg, width, std::io::stdin().is_terminal() && std::io::stdout().is_terminal()));
-        if !message.is_empty() { layout.print(layout.text(&watch_layout::escape_controls(message), width)); }
-    }
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let height = if interactive { ui::watch_terminal_height() } else { 0 };
+    layout.print(layout.settings(cfg, (width, height), interactive, editor, message, page));
 }
 
 fn cmd_status(
@@ -756,7 +759,7 @@ fn cmd_status(
     if view == WatchView::Config
         && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
     {
-        render_watch_settings(&cfg, &p, None, "");
+        render_watch_settings(&cfg, &p, None, "", &mut watch_layout::SettingsPage::default());
         return 0;
     }
 
@@ -773,6 +776,7 @@ fn cmd_status(
     let mut editor = None;
     let mut watch_scroll = 0usize;
     let mut settings_message = String::new();
+    let mut settings_page = watch_layout::SettingsPage::default();
     let mut first = true;
     let mut toast: Option<(String, Instant)> = None;
 
@@ -791,7 +795,7 @@ fn cmd_status(
             }
         }
         if view == WatchView::Config {
-            render_watch_settings(&cfg, &p, editor.as_ref(), &settings_message);
+            render_watch_settings(&cfg, &p, editor.as_ref(), &settings_message, &mut settings_page);
         } else {
             render_status_dashboard(
                 &cfg, top, &p, toast.as_ref().map(|(m, _)| m.as_str()), Some(&mut watch_scroll), sleep_secs,
@@ -802,6 +806,11 @@ fn cmd_status(
         let deadline = Instant::now() + Duration::from_secs(sleep_secs);
         while Instant::now() < deadline && !WATCH_STOP.load(Ordering::SeqCst) {
             if let Some(key) = term.poll_key(100) {
+                if view == WatchView::Config && matches!(key, b'[' | b']') {
+                    settings_page.step(key == b']');
+                    break;
+                }
+                settings_page.follow();
                 if let Some(active) = editor.as_mut() {
                     use watch_editor::Outcome;
                     match active.input(key) {
