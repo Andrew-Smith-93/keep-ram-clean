@@ -1,0 +1,37 @@
+name: Bug report
+description: Report a reproducible Keep RAM Clean problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are public. For a suspected vulnerability, use the [security policy](https://github.com/Andrew-Smith-93/keep-ram-clean/blob/main/SECURITY.md) instead.
+        Remove secrets, usernames, private paths, and workload details from anything you share. Don't run destructive commands or deliberately create memory pressure to fill out this form.
+  - type: input
+    id: version
+    attributes:
+      label: Keep RAM Clean version
+      description: Paste the output of `keep-ram-clean --version`; for a source build, include the commit if known.
+      placeholder: "keep-ram-clean 2.3.1"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Linux environment
+      description: Distribution and release, architecture, and kernel if relevant. Mention a system service, user service, or standalone command if applicable.
+      placeholder: "Debian 12, amd64, user service"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: What happened, and how can we reproduce it safely?
+      description: Include the relevant action or command, smallest safe steps, actual result, and expected result. If reproduction would require risk, describe what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant redacted output (optional)
+      description: A small excerpt or screenshot is enough. Don't attach a full config, process list, or unredacted logs.

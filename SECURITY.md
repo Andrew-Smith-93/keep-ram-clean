@@ -1,10 +1,11 @@
 # Security Policy
 
-## Supported Versions
+## Versions to check
 
-| Version | Supported |
-| :--- | :--- |
-| 1.0.x | Yes |
+If you can reproduce the issue safely, check the
+[latest stable release](https://github.com/Andrew-Smith-93/keep-ram-clean/releases/latest).
+Please report any affected version you know about, even if you have not checked
+the latest release.
 
 ## Security Architecture
 
@@ -17,4 +18,16 @@ Because `keep-ram-clean` can run with root privileges (via `systemd` system serv
 
 ## Reporting a Vulnerability
 
-Please report security issues privately through GitHub Security Advisories (or contact the repository maintainer directly) rather than opening a public issue. Include steps to reproduce, affected version, and kernel/systemd version if applicable.
+Do not disclose vulnerability details in a public issue, pull request, or
+discussion. Contact the maintainer privately using the
+[maintainer contact already listed in Cargo.toml](Cargo.toml).
+
+Start with a short summary, affected version, and potential impact. If you have
+reproduction steps, logs, or artifacts with sensitive details, agree on a
+suitable private channel before sharing them. Include kernel or systemd
+versions if relevant. Do not send credentials or unrelated private data.
+
+If GitHub shows a **Report a vulnerability** button on the
+[repository's Security Advisories page](https://github.com/Andrew-Smith-93/keep-ram-clean/security/advisories),
+you may use that private form instead. If the button is absent, use the
+maintainer contact above.

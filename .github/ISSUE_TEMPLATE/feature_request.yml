@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an improvement to Keep RAM Clean.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe your use case without sharing private machine, workload, or account data.
+        A suspected vulnerability belongs in the [private reporting process](https://github.com/Andrew-Smith-93/keep-ram-clean/blob/main/SECURITY.md), not this form.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Explain the problem or workflow, and where the current behavior falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What would make this better?
+      description: Describe the behavior you want. If this affects cleanup, privileges, or defaults, explain what should stay opt-in or unchanged.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds or alternatives (optional)
+      description: What have you tried, or what other approaches might help?

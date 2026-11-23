@@ -299,6 +299,13 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for reporting bugs, building and testing,
+and opening a pull request. Participation follows our
+[Code of Conduct](CODE_OF_CONDUCT.md). Use [SECURITY.md](SECURITY.md) for
+private vulnerability reports.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
