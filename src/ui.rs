@@ -345,29 +345,187 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
+// Decode input before testing it against action keys. Only a *standalone* ESC
+// is delivered as ESC; sequences and alternate-key chords are consumed.
+#[derive(Clone, Copy, Default)]
+enum KeySequence {
+    #[default]
+    Ready,
+    Escape,
+    Csi {
+        number: u16,
+        digits: u8,
+        simple: bool,
+    },
+    Control,
+    String {
+        escaped: bool,
+        bell: bool,
+    },
+    IgnoreBytes(u8),
+    Paste(usize),
+}
+
+impl KeySequence {
+    fn feed(&mut self, byte: u8) -> Option<u8> {
+        use KeySequence::*;
+        *self = match *self {
+            Ready if byte == 27 => Escape,
+            Ready => return Some(byte),
+            Escape => match byte {
+                27 => Escape,
+                b'[' => Csi {
+                    number: 0,
+                    digits: 0,
+                    simple: true,
+                },
+                b'O' | 0x20..=0x2f => Control,
+                b']' => String {
+                    escaped: false,
+                    bell: true,
+                },
+                b'P' | b'X' | b'^' | b'_' => String {
+                    escaped: false,
+                    bell: false,
+                },
+                _ => Ready, // Alt + key
+            },
+            Csi {
+                digits: 0,
+                simple: true,
+                ..
+            } if byte == b'[' => Control, // Linux console F-keys
+            Csi {
+                number: 200,
+                digits: 3,
+                simple: true,
+            } if byte == b'~' => Paste(0),
+            Csi {
+                digits: 0,
+                simple: true,
+                ..
+            } if byte == b'M' => IgnoreBytes(3), // X10 mouse report
+            Csi { .. } | Control if byte == 27 => Escape,
+            Csi { .. } | Control if (0x40..=0x7e).contains(&byte) => Ready,
+            Csi {
+                number,
+                digits,
+                simple: true,
+            } if digits < 3 && byte.is_ascii_digit() => Csi {
+                number: number * 10 + u16::from(byte - b'0'),
+                digits: digits + 1,
+                simple: true,
+            },
+            Csi { .. } => Csi {
+                number: 0,
+                digits: 0,
+                simple: false,
+            },
+            Control => Control,
+            String { escaped, bell } => {
+                if (bell && byte == 7) || (escaped && byte == b'\\') {
+                    Ready
+                } else {
+                    String {
+                        escaped: byte == 27,
+                        bell,
+                    }
+                }
+            }
+            IgnoreBytes(1) => Ready,
+            IgnoreBytes(n) => IgnoreBytes(n - 1),
+            Paste(matched) => {
+                const END: &[u8] = b"\x1b[201~";
+                if END[matched] == byte {
+                    if matched + 1 == END.len() {
+                        Ready
+                    } else {
+                        Paste(matched + 1)
+                    }
+                } else {
+                    Paste(usize::from(byte == 27))
+                }
+            }
+        };
+        None
+    }
+
+    fn idle(&mut self) -> Option<u8> {
+        if matches!(*self, Self::Escape) {
+            *self = Self::Ready;
+            Some(27)
+        } else {
+            None
+        }
+    }
+}
+
 /// RAII guard for non-canonical, no-echo stdin in `--watch` mode (auto-restores on drop).
 pub struct RawTerminalGuard {
     orig: Option<libc::termios>,
+    keys: KeySequence,
 }
 
 impl RawTerminalGuard {
     pub fn enter() -> Self {
         if !std::io::stdin().is_terminal() {
-            return Self { orig: None };
+            return Self {
+                orig: None,
+                keys: KeySequence::Ready,
+            };
         }
         let mut orig: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut orig) } != 0 {
-            return Self { orig: None };
+            return Self {
+                orig: None,
+                keys: KeySequence::Ready,
+            };
         }
-        let mut raw = orig;
+        let result = Self {
+            orig: Some(orig),
+            keys: KeySequence::Ready,
+        };
+        result.settings_mode(false);
+        result
+    }
+
+    /// Keep OS signals intact outside Settings. Inside Settings keyboard
+    /// Ctrl+C/Ctrl+\ and Ctrl+Z are just unbound input, not shortcuts.
+    pub(crate) fn settings_mode(&self, settings: bool) {
+        let Some(mut raw) = self.orig else {
+            return;
+        };
         raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        if settings {
+            raw.c_lflag &= !(libc::ISIG | libc::IEXTEN);
+            raw.c_iflag &= !(libc::IXON | libc::IXOFF);
+        }
         raw.c_cc[libc::VMIN] = 0;
         raw.c_cc[libc::VTIME] = 0;
         unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) };
-        Self { orig: Some(orig) }
     }
 
-    pub fn poll_key(&self, timeout_ms: i32) -> Option<u8> {
+    pub fn poll_key(&mut self, timeout_ms: i32) -> Option<u8> {
+        for _ in 0..64 {
+            // Terminal-generated escape sequences arrive as a burst; don't
+            // mistake the introducer for the deliberately pressed Escape key.
+            let wait = if matches!(self.keys, KeySequence::Escape) {
+                40
+            } else {
+                timeout_ms
+            };
+            if let Some(byte) = self.read_byte(wait) {
+                if let Some(key) = self.keys.feed(byte) {
+                    return Some(key);
+                }
+            } else {
+                return self.keys.idle();
+            }
+        }
+        None
+    }
+
+    fn read_byte(&self, timeout_ms: i32) -> Option<u8> {
         if self.orig.is_none() {
             std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
             return None;
@@ -406,6 +564,32 @@ impl Drop for RawTerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_escape_decoder_delivers_only_explicit_keys() {
+        let mut keys = KeySequence::default();
+        for bytes in [
+            b"\x1b[A".as_slice(),
+            b"\x1b[5~",
+            b"\x1bOP",
+            b"\x1b[[A",
+            b"\x1b[1;2Q",
+            b"\x1bq",
+            b"\x1b]payload-q\x07",
+            b"\x1b[200~q\rsw\x1b[201~",
+            b"\x1b[Mqsr",
+        ] {
+            assert!(bytes.iter().all(|b| keys.feed(*b).is_none()), "{bytes:?}");
+            assert_eq!(keys.idle(), None);
+            assert_eq!(keys.feed(b'q'), Some(b'q'));
+        }
+        assert_eq!(keys.feed(27), None);
+        assert_eq!(keys.feed(b'['), None);
+        assert_eq!(keys.idle(), None); // a delayed final byte isn't a key
+        assert_eq!(keys.feed(b'r'), None);
+        assert_eq!(keys.feed(27), None);
+        assert_eq!(keys.idle(), Some(27));
+    }
 
     #[test]
     fn formatting_and_ansi_width_work() {

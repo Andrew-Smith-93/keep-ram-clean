@@ -156,7 +156,9 @@ Press `s` for Settings or start there with
 process's configuration, not the daemon's in-memory settings.
 Read and edit views use the same two-column grid on normal terminals. On
 smaller screens, use `[` and `]` to move between pages. In the editor, `>`
-marks the selected field and `*` marks a staged change.
+marks the selected field and `*` marks a staged change. Press `q` to quit
+Settings, or `s` or a standalone Esc to return to Watch. Arrow, Page,
+and function keys are not Settings shortcuts.
 
 To edit an existing configuration you own, press `e`, select a row with
 `j`/`k`, and press Enter. Enter stages each new value. Use `w` to review

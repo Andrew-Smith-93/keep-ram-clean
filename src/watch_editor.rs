@@ -104,6 +104,7 @@ enum Mode {
 }
 
 pub(crate) enum Outcome {
+    Ignore,
     Continue,
     Cancel,
     Quit,
@@ -168,7 +169,7 @@ impl Editor {
                 b'w' => self.note = "No changed values to save.".into(),
                 27 => return Outcome::Cancel,
                 b'q' => return Outcome::Quit,
-                _ => {}
+                _ => return Outcome::Ignore,
             },
             Mode::Value => match key {
                 27 => {
@@ -194,7 +195,7 @@ impl Editor {
                     Err(e) => self.note = e,
                 },
                 b' '..=b'~' if self.buffer.len() < 48 => self.buffer.push(key as char),
-                _ => {}
+                _ => return Outcome::Ignore,
             },
             Mode::Confirm => match key {
                 b'j' => {
@@ -210,7 +211,7 @@ impl Editor {
                     self.note.clear();
                 }
                 b'q' => return Outcome::Quit,
-                _ => {}
+                _ => return Outcome::Ignore,
             },
         }
         Outcome::Continue

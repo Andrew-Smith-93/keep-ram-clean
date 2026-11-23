@@ -36,6 +36,8 @@ use crate::ui::{
     psi_badge, terminal_width, truncate_str, Palette, Panel, RawTerminalGuard,
 };
 
+#[cfg(test)]
+static WATCH_KEY_FIXTURE: AtomicBool = AtomicBool::new(false);
 static WATCH_STOP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_watch_sigint(_sig: libc::c_int) {
@@ -303,6 +305,12 @@ fn render_status_dashboard(
     watch_scroll: Option<&mut usize>,
     interval: u64,
 ) {
+    #[cfg(test)]
+    if WATCH_KEY_FIXTURE.load(Ordering::Relaxed) {
+        println!("FIXTURE DASHBOARD");
+        return;
+    }
+
     let w = if watch_scroll.is_some() { ui::watch_terminal_width() } else { terminal_width() };
     let two_col = w >= 96;
     let col_inner = if two_col {
@@ -661,9 +669,9 @@ enum WatchInput {
 
 fn watch_input(view: WatchView, key: u8) -> WatchInput {
     match (view, key) {
-        (_, b'q' | b'Q' | 3) => WatchInput::Quit,
+        (WatchView::Dashboard, b'q' | b'Q' | 3) | (WatchView::Config, b'q') => WatchInput::Quit,
         (WatchView::Dashboard, b's' | b'S') => WatchInput::View(WatchView::Config),
-        (WatchView::Config, b's' | b'S' | 27) => WatchInput::View(WatchView::Dashboard),
+        (WatchView::Config, b's' | 27) => WatchInput::View(WatchView::Dashboard),
         (WatchView::Config, _) => WatchInput::Ignore,
         (_, key) => WatchInput::DashboardKey(key),
     }
@@ -772,7 +780,8 @@ fn cmd_status(
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
 
-    let term = RawTerminalGuard::enter();
+    let mut term = RawTerminalGuard::enter();
+    term.settings_mode(view == WatchView::Config);
     let mut editor = None;
     let mut watch_scroll = 0usize;
     let mut settings_message = String::new();
@@ -810,10 +819,13 @@ fn cmd_status(
                     settings_page.step(key == b']');
                     break;
                 }
-                settings_page.follow();
                 if let Some(active) = editor.as_mut() {
                     use watch_editor::Outcome;
-                    match active.input(key) {
+                    let outcome = active.input(key);
+                    if matches!(outcome, Outcome::Ignore) { continue; }
+                    settings_page.follow();
+                    match outcome {
+                        Outcome::Ignore => unreachable!(),
                         Outcome::Continue => {}
                         Outcome::Cancel => {
                             editor = None;
@@ -832,6 +844,7 @@ fn cmd_status(
                     break;
                 }
                 if view == WatchView::Config && key == b'e' {
+                    settings_page.follow();
                     match watch_editor::Editor::open(&cfg) {
                         Ok(opened) => { editor = Some(opened); settings_message.clear(); }
                         Err(error) => settings_message = error,
@@ -845,12 +858,19 @@ fn cmd_status(
                     }
                     WatchInput::View(next) => {
                         settings_message.clear();
+                        settings_page.follow();
                         view = next;
+                        term.settings_mode(view == WatchView::Config);
                         break;
                     }
                     WatchInput::Ignore => continue,
                     WatchInput::DashboardKey(key) => key,
                 };
+                #[cfg(test)]
+                if WATCH_KEY_FIXTURE.load(Ordering::Relaxed) && matches!(key, b'c' | b'C' | b'r' | b'R' | b'+' | b'=' | b'-' | b'_' | b'n' | b'N') {
+                    println!("FIXTURE ACTION {}", key as char);
+                    break;
+                }
                 let msg = match key {
                     b'j' if p.color => { watch_scroll = watch_scroll.saturating_add(1); break; }
                     b'k' if p.color => { watch_scroll = watch_scroll.saturating_sub(1); break; }
@@ -1147,4 +1167,23 @@ fn main() -> ExitCode {
         },
     };
     ExitCode::from(code as u8)
+}
+
+#[cfg(test)]
+#[test]
+fn fixture_watch_keyboard_pty() {
+    let Some(config) = std::env::var_os("KRC_WATCH_KEY_FIXTURE") else {
+        return;
+    };
+    WATCH_KEY_FIXTURE.store(true, Ordering::Relaxed);
+    let mut args = vec!["keep-ram-clean".into(), "--config".into(), config,
+        "status".into(), "--watch".into(), "--top".into(), "0".into(), "--interval".into(), "30".into()];
+    if std::env::var_os("KRC_WATCH_KEY_EMBEDDED").is_none() {
+        args.extend([std::ffi::OsString::from("--view"), "config".into()]);
+    }
+    let cli = Cli::parse_from(args);
+    let Commands::Status { json, top, watch, interval, view } = cli.command else {
+        unreachable!("test fixture must invoke status");
+    };
+    assert_eq!(cmd_status(cli.config, json, top, watch, interval, view), 0);
 }
