@@ -29,5 +29,14 @@ jobs:
         run: |
           chmod +x scripts/build-deb.sh
           ./scripts/build-deb.sh dist
+          ./scripts/verify-deb.sh dist/*.deb
           sudo apt-get update -qq && sudo apt-get install -y -qq lintian
           lintian --no-tag-display-limit dist/*.deb || true
+
+  bookworm-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and verify Bookworm amd64 convenience package
+        run: ./scripts/build-bookworm.sh dist/bookworm

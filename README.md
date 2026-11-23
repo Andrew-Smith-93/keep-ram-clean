@@ -30,16 +30,26 @@ A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linu
 
 ## Build & Installation
 
-### Debian / Ubuntu (`.deb` Package)
+### Debian packages
 
-Download the `.deb` from [GitHub Releases](https://github.com/Andrew-Smith-93/keep-ram-clean/releases) (or build locally with `./scripts/build-deb.sh`):
+Do not use the historical GitHub v2.2.0 amd64 binary as a Debian 12
+package: its metadata says libc6 >= 2.34, but its ELF requires GLIBC_2.39.
+That release tag predates the current packaging; a new build does not
+retroactively correct or authenticate an old asset.
+
+For Debian 12 **amd64**, build the committed checkout in the pinned Bookworm
+image; this does not install the package or start either service:
 
 ```bash
-sudo apt install ./keep-ram-clean_2.2.0-1_amd64.deb
-sudo systemctl enable --now keep-ram-clean.service
+./scripts/build-bookworm.sh dist/bookworm
+(cd dist/bookworm && sha256sum -c *.sha256)
 ```
 
-### From Source (Rust 1.75+)
+See [the build and provenance notes](debian/README.Debian) for requirements,
+verification limits, and the separate Debian source-package path. Packages
+built directly on another suite are not automatically compatible with Bookworm.
+
+### From source (locked dependency floor: Rust/Cargo 1.85; Bookworm build uses 1.90.0)
 
 ### System-Wide (Recommended — enables kernel reclaim & swap management)
 

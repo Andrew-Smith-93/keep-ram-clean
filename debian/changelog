@@ -1,3 +1,10 @@
+keep-ram-clean (2.2.0-2) UNRELEASED; urgency=medium
+
+  * Derive convenience package dependencies from the staged ELF.
+  * Record build provenance and checksums; distinguish native and bookworm builds.
+
+ -- Andrew Smith <andrewsmith.independent@gmail.com>  Mon, 23 Nov 2026 00:00:00 +0000
+
 keep-ram-clean (2.2.0-1) unstable; urgency=medium
 
   * Initial Debian package release (Closes: #1154647).

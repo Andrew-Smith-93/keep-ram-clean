@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
-# Build a Debian-Policy-compliant .deb binary package using cargo + dpkg-deb.
+# Build a native convenience package; this is not a Debian archive source build.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="${1:-$REPO_DIR/dist}"
 
-VERSION="$(grep -m1 '^version' "$REPO_DIR/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
-DEB_REV="1"
+OUT_DIR="$(realpath -m "$OUT_DIR")"
+cd "$REPO_DIR"
+export LC_ALL=C
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(dpkg-parsechangelog -STimestamp)}"
+VERSION="$(dpkg-parsechangelog -SVersion)"
 ARCH="$(dpkg --print-architecture)"
 PKG_NAME="keep-ram-clean"
-DEB_FILE="${PKG_NAME}_${VERSION}-${DEB_REV}_${ARCH}.deb"
+DEB_FILE="${PKG_NAME}_${VERSION}_${ARCH}.deb"
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_DIR/target}"
+RUST_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+revision="${KRC_BUILD_REVISION:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+    revision="$revision+dirty"
+fi
 
 echo "Building ${DEB_FILE}..."
-(cd "$REPO_DIR" && cargo build --release --locked)
+cargo build --release --locked --target "$RUST_HOST" --target-dir "$TARGET_DIR"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -27,7 +36,7 @@ mkdir -p \
     "$STAGE/usr/share/doc/${PKG_NAME}" \
     "$STAGE/usr/share/man/man1"
 
-install -m 0755 "$REPO_DIR/target/release/keep-ram-clean" "$STAGE/usr/bin/keep-ram-clean"
+install -m 0755 "$TARGET_DIR/$RUST_HOST/release/keep-ram-clean" "$STAGE/usr/bin/keep-ram-clean"
 install -m 0644 "$REPO_DIR/config/config.example.toml" "$STAGE/etc/keep-ram-clean/config.toml"
 install -m 0644 "$REPO_DIR/debian/keep-ram-clean.service" "$STAGE/usr/lib/systemd/system/keep-ram-clean.service"
 install -m 0644 "$REPO_DIR/debian/keep-ram-clean-user.service" "$STAGE/usr/lib/systemd/user/keep-ram-clean.service"
@@ -41,26 +50,13 @@ chmod 0644 \
 
 INSTALLED_KB="$(du -sk "$STAGE/usr" "$STAGE/etc" | awk '{s+=$1} END {print s}')"
 
-cat > "$STAGE/DEBIAN/control" <<EOF
-Package: ${PKG_NAME}
-Version: ${VERSION}-${DEB_REV}
-Section: admin
-Priority: optional
-Architecture: ${ARCH}
-Installed-Size: ${INSTALLED_KB}
-Depends: libc6 (>= 2.34)
-Maintainer: Andrew Smith <andrewsmith.independent@gmail.com>
-Homepage: https://github.com/Andrew-Smith-93/keep-ram-clean
-Description: Configurable Linux RAM, tmpfs, swap, and memory-pressure daemon
- keep-ram-clean is a lightweight Rust daemon and CLI that monitors Linux memory
- health via /proc/meminfo, Pressure Stall Information (/proc/pressure/memory),
- /proc/swaps, and /proc/mounts, triggering safe modular cleanup actions only
- when user-specified thresholds or schedules are met.
- .
- Features include cgroup v2 proactive memory.reclaim, zram-aware disk swap
- flushing, open-file-safe tmpfs cleanup, a pidfd-pinned process watchdog, an
- interactive full-width status dashboard, and a kernel VM doctor audit.
-EOF
+# Resolve the actual staged ELF using the suite's installed symbols database.
+dpkg-shlibdeps -T"$STAGE/substvars" -e"$STAGE/usr/bin/$PKG_NAME"
+grep -Eq '^shlibs:Depends=.+' "$STAGE/substvars" || { echo 'Missing ELF dependencies' >&2; exit 1; }
+printf 'misc:Depends=\n' >> "$STAGE/substvars"
+dpkg-gencontrol -p"$PKG_NAME" -P"$STAGE" -T"$STAGE/substvars" \
+    -V"Installed-Size=$INSTALLED_KB" -f"$STAGE/files"
+rm "$STAGE/substvars" "$STAGE/files"
 
 install -m 0644 "$REPO_DIR/debian/conffiles" "$STAGE/DEBIAN/conffiles"
 for script in postinst prerm postrm; do
@@ -74,6 +70,17 @@ find "$STAGE" -type d -exec chmod 0755 {} +
 
 mkdir -p "$OUT_DIR"
 dpkg-deb --root-owner-group --build "$STAGE" "$OUT_DIR/$DEB_FILE"
+# These are the two artifacts in this build's scoped checksum manifest.
+info="${DEB_FILE%.deb}.provenance"
+(
+    . /etc/os-release
+    printf 'source_revision=%s\nos=%s\nsuite=%s\narchitecture=%s\n' "$revision" "$ID" "${VERSION_CODENAME:-unknown}" "$ARCH"
+    printf 'image=%s\nsource_date_epoch=%s\n' "${KRC_BUILD_IMAGE:-host}" "$SOURCE_DATE_EPOCH"
+    rustc -vV
+    cargo --version
+    dpkg-query -W dpkg-dev libc6
+    sha256sum Cargo.lock
+    dpkg-deb -f "$OUT_DIR/$DEB_FILE" Version Depends
+) > "$OUT_DIR/$info"
+(cd "$OUT_DIR" && sha256sum "$DEB_FILE" "$info" > "${DEB_FILE%.deb}.sha256")
 echo "Built: $OUT_DIR/$DEB_FILE"
-dpkg-deb --info "$OUT_DIR/$DEB_FILE"
-dpkg-deb --contents "$OUT_DIR/$DEB_FILE"

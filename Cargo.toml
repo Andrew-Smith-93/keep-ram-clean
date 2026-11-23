@@ -2,7 +2,7 @@
 name = "keep-ram-clean"
 version = "2.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "Configurable Linux RAM, tmpfs, swap, and memory-pressure management daemon and CLI"
 license = "MIT"
 readme = "README.md"

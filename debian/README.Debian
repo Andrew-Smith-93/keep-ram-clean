@@ -20,3 +20,33 @@ A non-root user service is also provided at
 /usr/lib/systemd/user/keep-ram-clean.service:
 
   systemctl --user enable --now keep-ram-clean.service
+
+Build scope and provenance
+--------------------------
+For an upstream convenience build, scripts/build-bookworm.sh takes the exact
+committed HEAD (not uncommitted edits), vendors the registry crates selected
+by Cargo.lock, and builds native linux/amd64 in a digest-pinned official Rust
+1.90.0 Bookworm image. It requires git, tar, Cargo with access to the locked
+crates (or a prepopulated offline cache), Docker and the image. The build
+container has no network and does not mount the user's home or start services.
+Use CARGO_NET_OFFLINE=true when the locked crates are cached. Stock Bookworm
+rustc/cargo are not the toolchain for this build.
+
+scripts/build-deb.sh is instead a native host convenience builder. It needs
+dpkg-dev, binutils, a linker, the installed development/symbols packages and
+a Rust toolchain compatible with the locked crates. Ubuntu CI's native
+package is an Ubuntu build, not Debian 12 verification. Build in the oldest
+supported suite, not on a newer host with a manually lowered Depends.
+The Debian source rules retain dh_shlibdeps and shlibs:Depends. They are a
+separate path: an archive-ready offline sbuild build with Debian-provided
+Rust dependencies has not been established by the convenience build.
+
+The .provenance sidecar records revision, suite, architecture, image/host,
+toolchain, Cargo.lock hash and package metadata. The per-package .sha256
+covers both artifacts; neither it nor this procedure signs them. Starting
+from a trusted copy, use sha256sum -c on that manifest. SOURCE_DATE_EPOCH
+defaults to the Debian changelog timestamp. To verify an independent build,
+use the same commit, image and architecture, and compare both checksums.
+scripts/verify-deb.sh recomputes dependencies on the extracted ELF in the
+same build suite and optionally enforces a GLIBC symbol ceiling. These are
+packaging/ABI checks, not a runtime or service certification.
