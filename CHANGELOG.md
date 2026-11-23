@@ -2,6 +2,12 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.2.1] - 2026-11-23
+
+### Fixed
+- Rebuilt the Debian 12 (Bookworm) amd64 package in a pinned Bookworm environment.
+- Derive runtime dependencies from the packaged ELF and include SHA-256 checksums and build provenance.
+
 ## [2.2.0] - 2026-11-20
 
 ### Added
