@@ -6,6 +6,31 @@ A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linu
 
 ---
 
+## Try v2.3.0 without installing it
+
+On **Debian 12 (Bookworm), amd64**, download the `.deb`, `.provenance`, and
+`.sha256` files from the [v2.3.0 release](https://github.com/Andrew-Smith-93/keep-ram-clean/releases/tag/v2.3.0)
+into the same directory. In that directory, run as your normal user:
+
+```sh
+(
+  set -eu
+  sha256sum -c keep-ram-clean_2.3.0-1_amd64.sha256
+  trial_dir=$(mktemp -d)
+  dpkg-deb -x keep-ram-clean_2.3.0-1_amd64.deb "$trial_dir"
+  "$trial_dir/usr/bin/keep-ram-clean" --version
+  "$trial_dir/usr/bin/keep-ram-clean" pressure-watch --help
+  printf 'Extracted files: %s\n' "$trial_dir"
+)
+```
+
+This smoke test runs only version and help: no `sudo`, package installation,
+services, cleanup, or process signaling. You can delete the temporary directory
+afterward. To try monitoring with a dedicated workload you own, use the
+[report-only workflow below](#opt-in-memory-pressure-relief) with the extracted
+binary, without `--terminate`. No need to create memory pressure on your machine;
+without sustained pressure, you won't see a recommendation.
+
 ## Key Features
 
 - **Ultra-Lightweight Native Rust Binary**
