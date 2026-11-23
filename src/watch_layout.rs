@@ -472,11 +472,21 @@ impl<'a> Layout<'a> {
         l.into_iter()
             .zip(r)
             .map(|(a, b)| {
-                if b.is_empty() {
-                    a
+                let padding = used_left.saturating_sub(self.width(&a));
+                if self.framed {
+                    if b.is_empty() {
+                        a
+                    } else {
+                        format!("{a}{}{b}", " ".repeat(padding + gutter))
+                    }
                 } else {
-                    let padding = used_left.saturating_sub(self.width(&a)) + gutter;
-                    format!("{a}{}{b}", " ".repeat(padding))
+                    // Double rule is a lane boundary, not another column in either table.
+                    format!(
+                        "{a}{} {}║{} {b}",
+                        " ".repeat(padding),
+                        self.p.cyan,
+                        self.p.nc
+                    )
                 }
             })
             .collect()
@@ -491,7 +501,8 @@ impl<'a> Layout<'a> {
     ) -> Vec<String> {
         let inner = width - 4;
         let mut frame_width = width;
-        let gaps = 2 * (headers.len() - 1);
+        let delimiter = if self.framed { "│ " } else { " │ " };
+        let gaps = self.width(delimiter) * (headers.len() - 1);
         let mut lines = Vec::new();
         let mut sizes = headers
             .iter()
@@ -499,11 +510,19 @@ impl<'a> Layout<'a> {
                 "USED / TOTAL" | "AMOUNTS" => 18, // fit two numbers with units
                 "USAGE" | "RAM SHARE" => 14,      // fit the mini gauge and percentage
                 "WHEN / CHANGE" => 27, // keep time/deltas together instead of starving this column
+                "PID" if !self.framed => 5,
+                "PROCESS" if !self.framed => 12,
+                "RSS" if !self.framed => 7,
                 _ => 8,
             })
             .collect::<Vec<_>>();
         let minimum = sizes.iter().sum::<usize>() + gaps;
-        if inner >= minimum.max(34) {
+        let floor = if !self.framed && headers.len() == 2 {
+            22
+        } else {
+            34
+        };
+        if inner >= minimum.max(floor) {
             let usable = inner - gaps;
             let mut left = usable - sizes.iter().sum::<usize>();
             let wants: Vec<_> = headers
@@ -549,7 +568,24 @@ impl<'a> Layout<'a> {
                 let cells: Vec<_> = row
                     .iter()
                     .zip(&sizes)
-                    .map(|(s, &size)| self.body(s, size))
+                    .zip(headers)
+                    .map(|((value, &size), &header)| {
+                        let lines = self.body(value, size);
+                        if !self.framed && matches!(header, "USED" | "TOTAL" | "RSS") {
+                            lines
+                                .into_iter()
+                                .map(|line| {
+                                    let value = line.trim_end();
+                                    format!(
+                                        "{}{value}",
+                                        " ".repeat(size.saturating_sub(self.width(value)))
+                                    )
+                                })
+                                .collect()
+                        } else {
+                            lines
+                        }
+                    })
                     .collect();
                 let height = cells.iter().map(Vec::len).max().unwrap_or(1);
                 (0..height)
@@ -559,7 +595,7 @@ impl<'a> Layout<'a> {
                             .zip(&sizes)
                             .map(|(c, &n)| c.get(y).cloned().unwrap_or_else(|| " ".repeat(n)))
                             .collect::<Vec<_>>()
-                            .join("│ ")
+                            .join(delimiter)
                     })
                     .collect::<Vec<_>>()
             };
@@ -569,6 +605,15 @@ impl<'a> Layout<'a> {
                     .map(|s| format!("{}{s}{}", self.p.bold, self.p.nc))
                     .collect::<Vec<_>>(),
             ));
+            if !self.framed {
+                lines.push(
+                    sizes
+                        .iter()
+                        .map(|n| "─".repeat(*n))
+                        .collect::<Vec<_>>()
+                        .join("─┼─"),
+                );
+            }
             for row in rows {
                 lines.extend(wrapped(row));
             }

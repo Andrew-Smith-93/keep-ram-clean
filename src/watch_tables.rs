@@ -67,39 +67,30 @@ impl Report<'_> {
         let mut resources = vec![
             vec![
                 "RAM".into(),
-                format!("{} / {}", fmt_mib(mem.used_mb), fmt_mib(mem.total_mb)),
+                fmt_mib(mem.used_mb),
+                fmt_mib(mem.total_mb),
                 utilization(mem.used_percent(), (ram - 15.0).max(50.0), ram),
             ],
             vec![
                 "Swap".into(),
-                format!(
-                    "{} / {}",
-                    fmt_mib(mem.swap_used_mb),
-                    fmt_mib(mem.swap_total_mb)
-                ),
+                fmt_mib(mem.swap_used_mb),
+                fmt_mib(mem.swap_total_mb),
                 utilization(mem.swap_used_percent(), (swap - 20.0).max(20.0), swap),
             ],
         ];
         for mount in &snap.tmpfs_mounts {
             resources.push(vec![
                 escape_controls(&mount.mountpoint),
-                format!("{} / {}", fmt_mib(mount.used_mb), fmt_mib(mount.total_mb)),
+                fmt_mib(mount.used_mb),
+                fmt_mib(mount.total_mb),
                 utilization(mount.used_percent(), (tmpfs - 20.0).max(40.0), tmpfs),
             ]);
         }
         let memory = [
-            vec![
-                "Available / Cache".into(),
-                format!("{} / {}", fmt_mib(mem.available_mb), fmt_mib(mem.cached_mb)),
-            ],
-            vec![
-                "Reclaimable slab / Dirty".into(),
-                format!(
-                    "{} / {}",
-                    fmt_mib(mem.slab_reclaimable_mb),
-                    fmt_mib(mem.dirty_mb)
-                ),
-            ],
+            vec!["Available".into(), fmt_mib(mem.available_mb)],
+            vec!["Cache".into(), fmt_mib(mem.cached_mb)],
+            vec!["Reclaimable slab".into(), fmt_mib(mem.slab_reclaimable_mb)],
+            vec!["Dirty".into(), fmt_mib(mem.dirty_mb)],
         ];
         let psi = &snap.psi;
         let mut pressure = Vec::new();
@@ -156,12 +147,12 @@ impl Report<'_> {
         let left = |w| {
             layout.table(
                 "MEMORY · SWAP · TMPFS",
-                &["RESOURCE", "USED / TOTAL", "USAGE"],
+                &["RESOURCE", "USED", "TOTAL", "USAGE"],
                 &resources,
                 w,
             )
         };
-        let detail_table = |w| layout.table("RAM DETAILS", &["METRIC", "AMOUNTS"], &memory, w);
+        let detail_table = |w| layout.table("RAM DETAILS", &["METRIC", "AMOUNT"], &memory, w);
         let pressure_table =
             |w| layout.table("PRESSURE & LOAD", &["METRIC", "READING"], &pressure, w);
         let consumer_table = |w| {
@@ -182,7 +173,7 @@ impl Report<'_> {
             }
         };
         let mut live = Vec::new();
-        if width >= 96 {
+        if width >= 106 {
             live.extend(layout.pair_at(width, left_lane, left, pressure_table));
         } else {
             live.extend(left(width));
@@ -521,8 +512,20 @@ mod tests {
         if std::env::var_os("KRC_TEST_WATCH_PTY").is_some() {
             let width = crate::ui::watch_terminal_width();
             println!("PTY-WATCH-{width}-BEGIN");
-            for line in normal.render(width, &p) {
-                println!("{line}");
+            if std::env::var_os("KRC_TEST_WATCH_PTY_UNICODE").is_some() {
+                let mut unicode_snapshot = normal_snapshot.clone();
+                unicode_snapshot.tmpfs_mounts[0].mountpoint = "/run/資料/Cafe\u{301}-tail".into();
+                let unicode = Report {
+                    snapshot: &unicode_snapshot,
+                    ..normal
+                };
+                for line in unicode.render(width, &Palette::detect()) {
+                    println!("{line}");
+                }
+            } else {
+                for line in normal.render(width, &p) {
+                    println!("{line}");
+                }
             }
             println!("PTY-WATCH-{width}-END");
         }
@@ -556,6 +559,52 @@ mod tests {
                 assert_eq!(anchors, [anchors[0]; 3]);
             }
         }
+        for width in [120, 200] {
+            let rows = normal.render(width, &p);
+            for (left, right) in [
+                ("MEMORY · SWAP · TMPFS", "PRESSURE & LOAD"),
+                ("RAM DETAILS", "TOP 1 CONSUMERS"),
+                ("DAEMON STATE", "TRIGGERS"),
+            ] {
+                let row = rows
+                    .iter()
+                    .find(|row| row.contains(left) && row.contains(right))
+                    .unwrap();
+                assert!(row
+                    .split_once(left)
+                    .unwrap()
+                    .1
+                    .split_once(right)
+                    .unwrap()
+                    .0
+                    .contains('║'));
+            }
+            let header = rows
+                .iter()
+                .position(|row| {
+                    row.contains("RESOURCE") && row.contains("USED") && row.contains("TOTAL")
+                })
+                .unwrap();
+            assert!(rows[header + 1].contains("─┼─"));
+            let ram = rows
+                .iter()
+                .find(|row| row.contains("RAM") && row.contains("8.0 GiB"))
+                .unwrap();
+            assert_eq!(
+                ram.split('│')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .take(3)
+                    .collect::<Vec<_>>(),
+                ["RAM", "4.0 GiB", "8.0 GiB"]
+            );
+            assert!(rows.iter().any(|row| row.contains("build-worker │")));
+        }
+        let narrow = normal.render(36, &p).join("\n");
+        assert!(!narrow.contains("METRIC:"));
+        assert!(narrow
+            .lines()
+            .any(|row| row.contains("METRIC") && row.contains("READING")));
         let colored = Palette {
             color: true,
             bold: "\x1b[1m",
