@@ -1,3 +1,10 @@
+keep-ram-clean (2.3.3-1) UNRELEASED; urgency=medium
+
+  * Document the standalone pressure-watch command as deprecated without
+    changing its behavior or the daemon and Watch dashboard.
+
+ -- Andrew Smith <andrewsmith.independent@gmail.com>  Tue, 24 Nov 2026 03:53:00 +0000
+
 keep-ram-clean (2.3.2-1) UNRELEASED; urgency=medium
 
   * Size the default available-RAM cleanup floor to host capacity.

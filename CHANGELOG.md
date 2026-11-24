@@ -2,6 +2,14 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.3.3] - 2026-11-24
+
+### Deprecated
+- Documented the deprecation of the standalone `pressure-watch` command and
+  removed it from the quickstart. Existing commands, flags, scripts, and
+  behavior are unchanged. This does not affect the normal Watch dashboard,
+  default daemon, or separately configured Process Watchdog.
+
 ## [2.3.2] - 2026-11-24
 
 ### Fixed
