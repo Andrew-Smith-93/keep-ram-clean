@@ -195,15 +195,17 @@ impl TriggerEngine {
             }
         }
 
-        if t.min_available_mb > 0 && mem.available_mb <= t.min_available_mb {
-            let is_emerg = mem.available_mb <= (t.min_available_mb / 2);
-            if (is_emerg && !in_emergency_cooldown) || !in_cooldown {
-                reasons.push(format!(
-                    "Available RAM {} MiB <= {} MiB",
-                    mem.available_mb, t.min_available_mb
-                ));
-                if is_emerg {
-                    critical = true;
+        if let Some(floor) = t.effective_available_floor(mem.total_mb) {
+            if floor > 0 && mem.available_mb <= floor {
+                let is_emerg = mem.available_mb <= (floor / 2);
+                if (is_emerg && !in_emergency_cooldown) || !in_cooldown {
+                    reasons.push(format!(
+                        "Available RAM {} MiB <= {floor} MiB",
+                        mem.available_mb
+                    ));
+                    if is_emerg {
+                        critical = true;
+                    }
                 }
             }
         }
@@ -364,6 +366,61 @@ mod tests {
             load_avg_15m: load_1m,
             cpu_count: 4,
         }
+    }
+
+    #[test]
+    fn available_floor_does_not_fire_at_idle_on_small_hosts_but_still_handles_pressure() {
+        let local = LocalTime {
+            year: 2026,
+            month: 11,
+            day: 24,
+            hour: 12,
+            minute: 0,
+            weekday: 2,
+        };
+        let now = Instant::now();
+        let cases = [
+            (384, 305, None, false, false),
+            (384, 48, None, true, false),
+            (384, 24, None, true, true),
+            (384, 305, Some(1536), true, true),
+            (384, 1, Some(0), false, false),
+            (0, 0, None, false, false),
+            (u64::MAX, 1536, None, true, false),
+        ];
+        for (total, available, floor, expected, critical) in cases {
+            let mut cfg = Config::default();
+            // Isolate this trigger; the ordinary RAM percentage has its own policy.
+            cfg.triggers.ram_used_percent = 0.0;
+            cfg.triggers.min_available_mb = floor;
+            let mut snap = make_snap(0, 0.0, 0.0);
+            snap.memory.total_mb = total;
+            snap.memory.available_mb = available;
+            snap.memory.used_mb = total.saturating_sub(available);
+            let result = TriggerEngine::new(cfg).evaluate(&snap, local, now);
+            assert_eq!(
+                (result.should_run, result.critical),
+                (expected, critical),
+                "{total}, {available}, {floor:?}"
+            );
+            assert_eq!(
+                result
+                    .reasons
+                    .iter()
+                    .any(|r| r.starts_with("Available RAM")),
+                expected
+            );
+        }
+
+        // A real default-policy idle reproduction, including its other triggers.
+        let mut snap = make_snap(305, 0.0, 0.0);
+        snap.memory.total_mb = 384;
+        snap.memory.used_mb = 79;
+        assert!(
+            !TriggerEngine::new(Config::default())
+                .evaluate(&snap, local, now)
+                .should_run
+        );
     }
 
     #[test]

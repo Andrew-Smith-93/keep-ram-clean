@@ -1,7 +1,7 @@
 //! Read-only formatter for information collected by the original Watch loop.
 use crate::daemon::DaemonState;
 use crate::metrics::{ProcessInfo, SystemSnapshot};
-use crate::ui::{fmt_mib, fmt_mib_f64, psi_badge, Palette};
+use crate::ui::{fmt_available_floor, fmt_mib, fmt_mib_f64, psi_badge, Palette};
 use crate::watch_layout::{escape_controls, Layout};
 use crate::Config;
 
@@ -299,9 +299,9 @@ impl Report<'_> {
             vec![
                 "RAM / Available / Swap".into(),
                 format!(
-                    "≥ {:.0}% / ≤ {} / ≥ {:.0}%",
+                    "≥ {:.0}% / {} / ≥ {:.0}%",
                     t.ram_used_percent,
-                    fmt_mib(t.min_available_mb),
+                    fmt_available_floor(t, mem.total_mb),
                     t.swap_used_percent
                 ),
             ],

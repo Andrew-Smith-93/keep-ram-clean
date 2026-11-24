@@ -21,8 +21,9 @@ hysteresis_percent = 5.0
 # Trigger when (MemTotal - MemAvailable) / MemTotal >= ram_used_percent
 ram_used_percent = 80.0
 
-# Trigger when MemAvailable drops below this many MiB
-min_available_mb = 1536
+# Trigger when MemAvailable is at or below the floor in MiB.
+# Omit to use a RAM-sized default. Set explicitly to override it (0 disables).
+# min_available_mb = 512
 
 # Trigger when swap usage reaches this percentage or absolute MiB
 swap_used_percent = 50.0

@@ -168,17 +168,20 @@ marks the selected field and `*` marks a staged change. Press `q` to quit
 Settings, or `s` or a standalone Esc to return to Watch. Arrow, Page,
 and function keys are not Settings shortcuts.
 
-Settings previews a system preset for **Available floor**. It uses Linux's
-reported physical RAM, not current load, free RAM, process data, or cgroup
-limits. The recommendation is 4% of RAM rounded up in 64 MiB steps, with a
-128 MiB minimum and the existing 1536 MiB built-in value as its ceiling.
-For example, it suggests 192 MiB at 4 GiB and 704 MiB at 16 GiB. It does not
-change other triggers or enable any cleanup actions. If RAM size cannot be
-determined, no preset is suggested.
+When `triggers.min_available_mb` is omitted, **Available floor** adapts to
+the usable RAM Linux reports, not current load, free RAM, or cgroup limits.
+It rounds 4% of RAM up in 64 MiB steps, normally within 128–1536 MiB, and never
+exceeds one eighth of total RAM. Examples: 48 MiB at 384 MiB RAM, 192 MiB at
+4 GiB, and 704 MiB at 16 GiB. If RAM size is unknown, the automatic floor
+does not run; the other triggers are unchanged.
 
-A filled dot marks a **Saved** value from the file. An open dot marks a
-**Built-in default** used when no value was saved. A **Recommended preset**
-is only a suggestion; it never replaces either until you choose and save it.
+An explicit number always wins, including `0` to disable this trigger.
+Existing files are not edited: if an older configuration explicitly says
+`min_available_mb = 1536`, leave it to keep that setting or remove/comment
+the line to enable the adaptive floor on the next configuration load.
+Settings marks saved values with a filled dot and built-in defaults with an
+open dot. The machine preset matches the adaptive floor; selecting it and
+saving makes it an explicit value that no longer adapts.
 To edit an existing configuration you own, select a row with `j`/`k` and
 press Enter to open **Presets**. Choose a common value or **Off/On** with
 `j`/`k` and press Enter to stage it. **Available floor**
@@ -272,7 +275,7 @@ and [cgroup v2 memory.reclaim](https://docs.kernel.org/admin-guide/cgroup-v2.htm
 | --- | --- |
 | **Saved** | The value is explicitly set in the TOML file Watch read. A saved value doesn't prove the daemon has loaded it. |
 | **Built-in default** | The program supplies the value because it was not set in the file. It is not a hardware recommendation. |
-| **Preset / Recommended preset** | A ready-made choice. The Recommended preset for Available floor uses detected RAM capacity as a starting point. Choosing it stages a value; nothing is written until you review and save. |
+| **Preset / Recommended preset** | A ready-made choice. The Recommended preset for Available floor equals the adaptive built-in floor. Choosing it stages an explicit value; nothing is written until you review and save. |
 | **Manual** | A value you type instead of choosing a preset. |
 | **Staged / Preset draft / Manual draft** | A pending edit in Watch. It has not been written to the file and is not active in the daemon. |
 

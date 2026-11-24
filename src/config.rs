@@ -57,7 +57,7 @@ pub struct TriggerConfig {
     pub hysteresis_percent: f64,
 
     pub ram_used_percent: f64,
-    pub min_available_mb: u64,
+    pub min_available_mb: Option<u64>,
     pub swap_used_percent: f64,
     pub swap_used_mb: u64,
     pub tmpfs_used_percent: f64,
@@ -71,6 +71,25 @@ pub struct TriggerConfig {
     pub max_load_avg_ratio: f64,
 }
 
+/// Round 4% of RAM up to 64 MiB. The usual 128–1536 MiB range is capped
+/// at one eighth of usable RAM so the default cannot dominate small hosts.
+/// Zero means the capacity is unavailable (or too small for a MiB floor).
+pub(crate) fn automatic_available_floor(total_mib: u64) -> Option<u64> {
+    let ceiling = total_mib / 8;
+    if ceiling == 0 {
+        return None;
+    }
+    let rounded = total_mib.div_ceil(1600).min(24) * 64;
+    Some(rounded.max(128).min(ceiling))
+}
+
+impl TriggerConfig {
+    pub(crate) fn effective_available_floor(&self, total_mib: u64) -> Option<u64> {
+        self.min_available_mb
+            .or_else(|| automatic_available_floor(total_mib))
+    }
+}
+
 impl Default for TriggerConfig {
     fn default() -> Self {
         Self {
@@ -78,7 +97,7 @@ impl Default for TriggerConfig {
             cooldown_seconds: 300,
             hysteresis_percent: 5.0,
             ram_used_percent: 80.0,
-            min_available_mb: 1536,
+            min_available_mb: None,
             swap_used_percent: 50.0,
             swap_used_mb: 0,
             tmpfs_used_percent: 70.0,
@@ -1071,10 +1090,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn available_floor_auto_is_bounded_and_distinct_from_explicit_toml() {
+        for (total, expected) in [
+            (0, None),
+            (7, None),
+            (8, Some(1)),
+            (128, Some(16)),
+            (384, Some(48)),
+            (1024, Some(128)),
+            (4096, Some(192)),
+            (u64::MAX, Some(1536)),
+        ] {
+            assert_eq!(automatic_available_floor(total), expected);
+        }
+        for (raw, explicit) in [
+            ("", None),
+            ("[triggers]\nmin_available_mb = 1536", Some(1536)),
+            ("triggers.min_available_mb = 0", Some(0)),
+            ("triggers = { min_available_mb = 48 }", Some(48)),
+            ("[triggers]\n' min_available_mb' = 0", None),
+        ] {
+            let parsed: Result<Config, _> = toml::from_str(raw);
+            if raw.contains("' min_available_mb'") {
+                assert!(parsed.is_err());
+                continue;
+            }
+            let cfg = parsed.unwrap();
+            assert_eq!(cfg.triggers.min_available_mb, explicit);
+            assert_eq!(
+                cfg.triggers.effective_available_floor(384),
+                explicit.or(Some(48))
+            );
+            assert_eq!(cfg.triggers.effective_available_floor(0), explicit);
+        }
+    }
+
+    #[test]
     fn example_config_parses_and_validates() {
         let cfg: Config = toml::from_str(EXAMPLE_CONFIG_TOML).expect("example TOML must parse");
         assert!(cfg.validate().is_empty());
         assert_eq!(cfg.triggers.ram_used_percent, 80.0);
+        assert!(cfg.triggers.min_available_mb.is_none());
         assert_eq!(cfg.kernel.drop_caches_level, 2);
         assert!(cfg.swap.skip_zram);
     }

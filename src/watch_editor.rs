@@ -80,11 +80,23 @@ pub(crate) fn display_value(index: usize, raw: &str) -> String {
     }
 }
 
+pub(crate) fn display_current(index: usize, raw: &str, preset: Option<SystemPreset>) -> String {
+    if index == FLOOR && raw == "auto" {
+        preset.map_or_else(
+            || "auto n/a".into(),
+            |p| format!("{} MiB auto", p.floor_mib),
+        )
+    } else {
+        display_value(index, raw)
+    }
+}
+
 pub(crate) fn values(c: &Config) -> [String; FIELDS.len()] {
     let t = &c.triggers;
     [
         t.ram_used_percent.to_string(),
-        t.min_available_mb.to_string(),
+        t.min_available_mb
+            .map_or_else(|| "auto".into(), |mb| mb.to_string()),
         t.swap_used_percent.to_string(),
         t.swap_used_mb.to_string(),
         t.tmpfs_used_percent.to_string(),
@@ -115,17 +127,8 @@ pub(crate) struct SystemPreset {
 
 impl SystemPreset {
     pub(crate) fn from_ram_mib(ram_mib: u64) -> Option<Self> {
-        if ram_mib < 128 {
-            return None;
-        }
-        // Round 4% of physical RAM up to a 64 MiB boundary; never raise the
-        // trigger above the shipping default or use current memory pressure.
-        let cap = crate::config::TriggerConfig::default().min_available_mb;
-        let floor_mib = ram_mib.div_ceil(1600).min(cap.div_ceil(64)) * 64;
-        Some(Self {
-            ram_mib,
-            floor_mib: floor_mib.clamp(128, cap),
-        })
+        let floor_mib = crate::config::automatic_available_floor(ram_mib)?;
+        Some(Self { ram_mib, floor_mib })
     }
 
     pub(crate) fn detect() -> Option<Self> {
@@ -133,9 +136,7 @@ impl SystemPreset {
         if let Ok(fixture) = std::env::var("KRC_WATCH_PRESET_RAM_MIB") {
             return Self::from_ram_mib(fixture.parse().ok()?);
         }
-        let pages = u64::try_from(unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) }).ok()?;
-        let size = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
-        Self::from_ram_mib(pages.checked_mul(size)? / (1024 * 1024))
+        Self::from_ram_mib(crate::metrics::read_meminfo().total_mb)
     }
 }
 
@@ -431,7 +432,14 @@ impl Editor {
                 let i = changed[self.review_page];
                 rows.push(vec![
                     FIELDS[i].0.into(),
-                    before[i].clone(),
+                    if before[i] == "auto" {
+                        self.preset.map_or_else(
+                            || "auto (unavailable)".into(),
+                            |p| format!("{} (auto)", p.floor_mib),
+                        )
+                    } else {
+                        before[i].clone()
+                    },
                     after[i].clone(),
                     FIELDS[i].1.into(),
                 ]);
@@ -453,9 +461,20 @@ impl Editor {
                     ),
                     format!("Source: {origin} → {proposal}"),
                 ];
+                let total_mib = self.preset.map_or(0, |preset| preset.ram_mib);
                 if i == FLOOR
-                    && self.draft.proposed.triggers.min_available_mb
-                        > self.draft.original.triggers.min_available_mb
+                    && self
+                        .draft
+                        .proposed
+                        .triggers
+                        .effective_available_floor(total_mib)
+                        .unwrap_or(0)
+                        > self
+                            .draft
+                            .original
+                            .triggers
+                            .effective_available_floor(total_mib)
+                            .unwrap_or(0)
                 {
                     hints.push("A higher floor can trigger cleanup sooner after reload.".into());
                 } else {
@@ -510,6 +529,7 @@ mod tests {
         use crate::triggers::{LocalTime, TriggerEngine};
         use std::time::Instant;
         for (ram_mib, floor_mib) in [
+            (384, 48),
             (1024, 128),
             (4096, 192),
             (8192, 384),
@@ -544,16 +564,18 @@ mod tests {
                     load_avg_15m: 0.0,
                     cpu_count: 1,
                 };
-                let mut cfg = Config::default();
-                let legacy = TriggerEngine::new(cfg.clone()).evaluate(&snap, local, now);
-                assert_eq!(legacy.should_run, ram_mib == 1024);
-                if ram_mib == 1024 {
+                let mut legacy_cfg = Config::default();
+                legacy_cfg.triggers.min_available_mb = Some(1536);
+                let legacy = TriggerEngine::new(legacy_cfg).evaluate(&snap, local, now);
+                assert_eq!(legacy.should_run, ram_mib <= 1024);
+                if ram_mib <= 1024 {
                     assert!(legacy.reasons.iter().any(|r| r.contains("Available RAM")));
                 }
-                cfg.triggers.min_available_mb = SystemPreset::from_ram_mib(snap.memory.total_mb)
-                    .unwrap()
-                    .floor_mib;
-                assert_eq!(cfg.triggers.min_available_mb, floor_mib);
+                let cfg = Config::default();
+                assert_eq!(
+                    cfg.triggers.effective_available_floor(snap.memory.total_mb),
+                    Some(preset.floor_mib)
+                );
                 assert!(cfg.validate().is_empty());
                 assert!(
                     !TriggerEngine::new(cfg)
@@ -685,7 +707,7 @@ mod tests {
         assert!(editor.changes().is_empty());
         editor.input(b'\r');
         assert_eq!(source(&original, FLOOR, Some(&editor)), 'P');
-        assert_eq!(editor.draft.proposed.triggers.min_available_mb, 384);
+        assert_eq!(editor.draft.proposed.triggers.min_available_mb, Some(384));
         editor.input(b'w');
         assert!(editor
             .review()
@@ -702,7 +724,7 @@ mod tests {
         );
         drop(editor);
         let mut editor = make_editor();
-        assert_eq!(editor.draft.proposed.triggers.min_available_mb, 384);
+        assert_eq!(editor.draft.proposed.triggers.min_available_mb, Some(384));
         editor.input(b'j');
         editor.input(b'\r');
         editor.input(b'm');
@@ -719,7 +741,7 @@ mod tests {
         )
         .unwrap();
         let mut editor = make_editor();
-        assert_eq!(editor.draft.proposed.triggers.min_available_mb, 0);
+        assert_eq!(editor.draft.proposed.triggers.min_available_mb, Some(0));
         editor.input(b'j');
         pick(&mut editor, "384");
         editor.input(b'w');
@@ -738,7 +760,7 @@ mod tests {
                 .unwrap()
                 .triggers
                 .min_available_mb,
-            0
+            Some(0)
         );
     }
 

@@ -99,6 +99,27 @@ pub fn fmt_mib(mib: u64) -> String {
     }
 }
 
+/// Format the configured comparison without implying that the daemon has loaded
+/// the same config as this CLI. "Off" is an explicit zero, not an unknown size.
+pub(crate) fn fmt_available_floor(
+    triggers: &crate::config::TriggerConfig,
+    total_mib: u64,
+) -> String {
+    match triggers.effective_available_floor(total_mib) {
+        Some(0) => "off".into(),
+        Some(floor) => format!(
+            "≤ {}{}",
+            fmt_mib(floor),
+            if triggers.min_available_mb.is_none() {
+                " auto"
+            } else {
+                ""
+            }
+        ),
+        None => "auto unavailable".into(),
+    }
+}
+
 pub fn fmt_mib_f64(mib: f64) -> String {
     if mib >= 1024.0 {
         format!("{:.2} GiB", mib / 1024.0)

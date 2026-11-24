@@ -769,12 +769,14 @@ impl<'a> Layout<'a> {
         editor: Option<&crate::watch_editor::Editor>,
         width: usize,
         focus: Option<usize>,
+        preset: Option<crate::watch_editor::SystemPreset>,
     ) -> Vec<String> {
-        use crate::watch_editor::{display_value, source, values, GROUPS, LABELS};
+        use crate::watch_editor::{display_current, source, values, GROUPS, LABELS};
         let p = self.p;
         let proposed = values(editor.map_or(cfg, |e| &e.draft.proposed));
-        let shown =
-            std::array::from_fn::<_, { LABELS.len() }, _>(|id| display_value(id, &proposed[id]));
+        let shown = std::array::from_fn::<_, { LABELS.len() }, _>(|id| {
+            display_current(id, &proposed[id], preset)
+        });
         let selected = editor
             .and_then(crate::watch_editor::Editor::selecting)
             .or(focus);
@@ -1043,9 +1045,12 @@ impl<'a> Layout<'a> {
                 |path| escape_controls(&path.display().to_string()),
             );
         if let Some(editor) = editor {
-            use crate::watch_editor::{display_value, source, values, FIELDS, LABELS};
+            use crate::watch_editor::{
+                display_current, display_value, source, values, FIELDS, LABELS,
+            };
             if let Some(index) = editor.selecting() {
-                let current = display_value(index, &values(&editor.draft.proposed)[index]);
+                let current =
+                    display_current(index, &values(&editor.draft.proposed)[index], page.preset());
                 let origin = match source(&editor.draft.original, index, Some(editor)) {
                     'F' => "Saved",
                     'P' => "Preset draft",
@@ -1121,7 +1126,13 @@ impl<'a> Layout<'a> {
             width,
         );
         rows.extend(self.text(&format!("Source: {source}"), width));
-        let grid = self.settings_grid(cfg, editor, width, interactive.then_some(page.selection));
+        let grid = self.settings_grid(
+            cfg,
+            editor,
+            width,
+            interactive.then_some(page.selection),
+            page.preset(),
+        );
         let rule_width = grid.iter().map(|row| self.width(row)).max().unwrap_or(0);
         rows.extend(grid);
         let rule_at = rows.len();
@@ -1142,7 +1153,7 @@ impl<'a> Layout<'a> {
                 {
                     "saved value kept"
                 } else {
-                    "not applied"
+                    "built-in floor"
                 }
             ),
             None => "Unavailable: RAM size unknown".into(),
@@ -1589,9 +1600,9 @@ mod tests {
         for color in [false, true] {
             let p = palette(color);
             let layout = Layout::new(&p);
-            let grid = layout.settings_grid(&cfg, None, 80, None);
-            assert_eq!(grid, layout.settings_grid(&cfg, None, 120, None));
-            assert_eq!(grid, layout.settings_grid(&cfg, None, 200, None));
+            let grid = layout.settings_grid(&cfg, None, 80, None, None);
+            assert_eq!(grid, layout.settings_grid(&cfg, None, 120, None, None));
+            assert_eq!(grid, layout.settings_grid(&cfg, None, 200, None, None));
             assert!(grid.iter().map(|row| layout.width(row)).max().unwrap() <= 76);
             for (heading, _) in GROUPS {
                 let row = grid.iter().position(|row| row.contains(heading)).unwrap();
@@ -1606,7 +1617,7 @@ mod tests {
             cfg.triggers.max_load_avg_ratio = 1.2345678901234566E-100;
             let raw = cfg.triggers.max_load_avg_ratio.to_string();
             for width in [38, 64, 80, 200] {
-                let rows = layout.settings_grid(&cfg, None, width, None);
+                let rows = layout.settings_grid(&cfg, None, width, None, None);
                 assert!(rows.iter().all(|row| layout.width(row) <= width));
                 // Left lane may have unrelated rows beside the wrapped value.
                 let text = rows
@@ -1805,6 +1816,7 @@ mod tests {
             &crate::Config::default(),
             &p,
             Some(&state),
+            8192,
             escape_controls,
         );
         let panel = Panel {

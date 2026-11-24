@@ -532,7 +532,7 @@ fn render_status_dashboard(
     }
 
     // Bottom panel shares the same activity fields and history limit as before.
-    let auto_lines = status_activity_lines(cfg, p, daemon_state.as_ref(), str::to_owned);
+    let auto_lines = status_activity_lines(cfg, p, daemon_state.as_ref(), snap.memory.total_mb, str::to_owned);
 
     let (act_badge, act_col) = if cleaning_now {
         ("CLEANING", p.yellow)
@@ -546,6 +546,7 @@ fn status_activity_lines(
     cfg: &Config,
     p: &Palette,
     daemon_state: Option<&daemon::DaemonState>,
+    total_mib: u64,
     terminal_value: impl Fn(&str) -> String,
 ) -> Vec<String> {
     const ACTIVITY_MARKER: &str = "*";
@@ -564,13 +565,13 @@ fn status_activity_lines(
         "Reactive".to_string()
     };
     auto_lines.push(format!(
-        "{}Triggers{} RAM ≥ {}{:.0}%{} │ Avail ≤ {} │ Swap ≥ {:.0}% │ PSI ≥ {:.0}/{:.0} │ Cooldown {}s │ Mode {} │ Alerts {notif_pill}",
+        "{}Triggers{} RAM ≥ {}{:.0}%{} │ Avail {} │ Swap ≥ {:.0}% │ PSI ≥ {:.0}/{:.0} │ Cooldown {}s │ Mode {} │ Alerts {notif_pill}",
         p.bold,
         p.nc,
         p.cyan,
         t.ram_used_percent,
         p.nc,
-        fmt_mib(t.min_available_mb),
+        ui::fmt_available_floor(t, total_mib),
         t.swap_used_percent,
         t.psi_some_avg10,
         t.psi_full_avg10,
@@ -983,7 +984,7 @@ fn cmd_config(cfg_path: Option<PathBuf>, action: ConfigAction) -> i32 {
             let lines = vec![
                 format!("{}{:<22} {:<16} {}{}", p.bold, "CLI KEY", "CURRENT", "DESCRIPTION", p.nc),
                 format!("{:<22} {:<16} {}", "ram-percent", format!("{:.1}%", t.ram_used_percent), "Auto-clean when RAM used >= this %"),
-                format!("{:<22} {:<16} {}", "min-avail-mb", format!("{} MiB", t.min_available_mb), "Auto-clean when available RAM <= MiB"),
+                format!("{:<22} {:<16} {}", "min-avail-mb", ui::fmt_available_floor(t, metrics::read_meminfo().total_mb), "Available RAM trigger (auto when unset)"),
                 format!("{:<22} {:<16} {}", "swap-percent", format!("{:.1}%", t.swap_used_percent), "Auto-clean when swap used >= this %"),
                 format!("{:<22} {:<16} {}", "tmpfs-percent", format!("{:.1}%", t.tmpfs_used_percent), "Auto-clean when /tmp tmpfs >= this %"),
                 format!("{:<22} {:<16} {}", "psi-some / psi-full", format!("{:.1} / {:.1}", t.psi_some_avg10, t.psi_full_avg10), "Linux PSI memory contention thresholds"),
