@@ -6,18 +6,18 @@ A tiny (~2 MiB RSS), single-binary **Rust** daemon and CLI for configurable Linu
 
 ---
 
-## Try v2.3.1 without installing it
+## Try v2.3.2 without installing it
 
 On **Debian 12 (Bookworm), amd64**, download the `.deb`, `.provenance`, and
-`.sha256` files from the [v2.3.1 release](https://github.com/Andrew-Smith-93/keep-ram-clean/releases/tag/v2.3.1)
+`.sha256` files from the [v2.3.2 release](https://github.com/Andrew-Smith-93/keep-ram-clean/releases/tag/v2.3.2)
 into the same directory. Run as your normal user:
 
 ```sh
 (
   set -eu
-  sha256sum --strict -c keep-ram-clean_2.3.1-1_amd64.sha256
+  sha256sum --strict -c keep-ram-clean_2.3.2-1_amd64.sha256
   trial_dir=$(mktemp -d)
-  dpkg-deb -x keep-ram-clean_2.3.1-1_amd64.deb "$trial_dir"
+  dpkg-deb -x keep-ram-clean_2.3.2-1_amd64.deb "$trial_dir"
   bin="$trial_dir/usr/bin/keep-ram-clean"
   "$bin" --version
   "$bin" status --help

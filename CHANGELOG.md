@@ -2,6 +2,15 @@
 
 All notable changes to `keep-ram-clean` will be documented in this file.
 
+## [2.3.2] - 2026-11-24
+
+### Fixed
+- Size the default available-RAM floor to usable RAM so low-memory hosts
+  no longer trigger idle cleanup just because their total RAM is below the
+  old 1536 MiB floor.
+- Keep explicit floor values, including zero, unchanged. New sample configs
+  leave the floor automatic; Watch and config show report the effective value.
+
 ## [2.3.1] - 2026-11-23
 
 ### Changed
