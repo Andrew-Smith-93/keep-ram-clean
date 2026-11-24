@@ -21,7 +21,6 @@ into the same directory. Run as your normal user:
   bin="$trial_dir/usr/bin/keep-ram-clean"
   "$bin" --version
   "$bin" status --help
-  "$bin" pressure-watch --help
   printf '%s\n' '# Disposable Watch Settings trial' > "$trial_dir/settings.toml"
   printf 'Extracted files: %s\n' "$trial_dir"
   "$bin" --config "$trial_dir/settings.toml" status --watch --view config
@@ -31,11 +30,6 @@ into the same directory. Run as your normal user:
 In Settings, select a field with `j`/`k` and press Enter to see presets. Press `m` for manual entry, or `q` to exit. Saving in this trial only
 edits the temporary file; there is no installation or daemon reload. You can
 delete the temporary directory after the trial.
-
-To try monitoring a dedicated workload you own, use the
-[report-only workflow below](#opt-in-memory-pressure-relief) with the extracted
-binary, without `--terminate`. The help command above does not monitor or signal
-any workload.
 
 ## Key Features
 
@@ -60,6 +54,12 @@ any workload.
 ---
 
 ## Opt-in memory-pressure relief
+
+**Deprecated: `pressure-watch` remains available for existing users and scripts.**
+Its options, output, and behavior are unchanged. It is a standalone command,
+not part of the normal `status --watch` dashboard or the default daemon. This
+deprecation does not affect the separate, opt-in Process Watchdog configured in
+TOML for ordinary cleanup.
 
 `pressure-watch` is separate from ordinary cleanup and is **report-only by default**.
 It does not run through the existing system or user services, the cleanup command, or
@@ -264,7 +264,7 @@ Linux references: [/proc and memory counters](https://docs.kernel.org/filesystem
 - **Cooldown / Re-arm margin (hysteresis):** Cooldown limits repeat reactive runs; some critical conditions use a shorter cooldown. Re-arm margin makes certain percentage triggers wait for the reading to fall below the threshold by a configured margin before they can trigger again. It reduces repeat runs while readings hover near a limit.
 - **CPU load limit / Notifications:** CPU load limit is a load-per-CPU ratio used for load-sensitive cleanup decisions, not a CPU-use percentage. Desktop notices can be filtered by a minimum amount of RAM freed or limited to runs marked critical. These settings control notices, not whether cleanup triggers.
 - **Drop caches / Drop critical-only / Cgroup reclaim / Minimum tmpfs age:** Drop caches asks the kernel to discard eligible caches: level 0 is off, 1 is page cache, 2 is reclaimable slab, and 3 is both. Drop critical-only restricts that action to runs classified as critical. Cgroup reclaim asks the kernel to reclaim memory from a Linux control group; the configured MiB is a request, not a guarantee. Minimum tmpfs age is how long a matching item must age before it can be considered for cleanup.
-- **Dry-run / report-only:** `run --dry-run` previews cleanup without applying it. The independent `pressure-watch` command reports by default; this does not change the ordinary daemon's cleanup settings.
+- **Dry-run / report-only:** `run --dry-run` previews cleanup without applying it. The deprecated standalone `pressure-watch` command reports by default; this does not change the ordinary daemon's cleanup settings.
 
 Kernel references: [drop_caches](https://docs.kernel.org/admin-guide/sysctl/vm.html#drop-caches)
 and [cgroup v2 memory.reclaim](https://docs.kernel.org/admin-guide/cgroup-v2.html).
